@@ -1,3 +1,5 @@
 cnfs/
 pycache/
 *.pyc
+bin/
+build/
