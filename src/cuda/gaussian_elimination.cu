@@ -3,8 +3,8 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 
-#include "gaussian_elimination.cuh"
-#include "gpu_utils.cuh"
+#include "cuda/gaussian_elimination.cuh"
+#include "cuda/gpu_utils.cuh"
 #include "cnf/cnf_structure.h"
 #include <vector>
 #include <cstring>

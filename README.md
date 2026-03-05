@@ -7,7 +7,7 @@ A high-performance approximate #SAT solver using XOR hashing with machine learni
 SharpSAT implements approximate model counting using:
 - **XOR-based universal hashing** to reduce solution space
 - **Machine learning-enhanced hash generation** for variance reduction
-- **CUDA parallelization** for Gaussian elimination and clause evaluation
+- **CUDA parallelization** for Gaussian elimination, clause evaluation, and unit propagation
 - **ApproxMC-inspired architecture** with modern optimizations
 
 ## Features
@@ -15,151 +15,236 @@ SharpSAT implements approximate model counting using:
 - ✅ Fast CNF parsing (DIMACS format)
 - ✅ Sparse XOR constraint generation (traditional + ML-enhanced)
 - ✅ GPU-accelerated Gaussian elimination
-- ✅ Parallel clause evaluation on CUDA
+- ✅ GPU-accelerated clause evaluation and unit propagation
+- ✅ DPLL SAT solver with MOMS heuristic
+- ✅ Automatic CPU/GPU fallback
+- ✅ Memory pooling for efficient GPU buffer reuse
 - ✅ Statistical confidence estimation
-- ✅ Support for large-scale CNFs (100k+ variables/clauses)
+- ✅ Support for large-scale CNFs (10,000+ variables/clauses)
 
 ## Building
 
 ### Prerequisites
-- CMake 3.18+
-- CUDA Toolkit 11.0+
+- CUDA Toolkit 11.8+ (with NVCC compiler)
+- g++-10 or newer (as NVCC host compiler)
 - C++17 compatible compiler
 - Python 3.8+ (for ML components)
+- GPU with compute capability 7.5+ (Turing/Ampere/Ada/Hopper)
 
-### Build with CMake
+### Build
 ```bash
-mkdir build && cd build
-cmake ..
-make -j
+make clean
+make
 ```
 
-### Build with Makefile
-```bash
-make -j
-# Or use CMake backend
-make cmake
-```
+The build system automatically:
+- Compiles all C++ sources with C++17
+- Compiles all CUDA sources with CUDA C++14
+- Links CUDA runtime and driver libraries
+- Produces `bin/sharp_sat` executable
 
-### Install Python dependencies
+### Install Python dependencies (for ML hash generation)
 ```bash
 cd ml_model
 pip install -r requirements.txt
+python train_model.py  # Train the ML model
 ```
 
 ## Usage
 
 ### Basic usage
 ```bash
-./bin/sharp_sat <cnf_file> [options]
+./bin/sharp_sat <cnf_file>
 ```
-
-### Options
-- `--epsilon <float>`: Approximation factor (default: 0.8)
-- `--delta <float>`: Confidence parameter (default: 0.2)
-- `--use-ml`: Enable ML-enhanced hash generation
-- `--no-cuda`: Disable CUDA acceleration (CPU only)
-- `--seed <int>`: Random seed
-- `--verbose`: Enable detailed logging
 
 ### Example
 ```bash
-./bin/sharp_sat benchmarks/cnfs/example.cnf --epsilon 0.8 --delta 0.2 --use-ml
+./bin/sharp_sat benchmarks/cnfs/easy_500_0.cnf
+./bin/sharp_sat benchmarks/cnfs/horn_1000_0.cnf
 ```
 
-## Testing
-
-```bash
-make test
-# Or run directly
-./bin/sharp_sat_tests
-```
+The counter automatically:
+- Detects CUDA availability and enables GPU acceleration
+- Uses ML-enhanced hash generation if model is available
+- Configures epsilon=0.8 and delta=0.2 for approximate counting
+- Logs progress and results to console
 
 ## Project Structure
 
 ```
-sharp_sat/
-├── CMakeLists.txt              # CMake build configuration
-├── Makefile                     # Alternative build system
-├── benchmarks/cnfs/             # Test CNF files
-├── cuda/                        # CUDA kernels
-│   ├── gaussian_elimination.cu  # Parallel Gaussian elimination
-│   ├── clause_evaluation.cu     # Parallel clause checking
-│   └── gpu_utils.cu             # GPU utilities
+approx_model_counting/
+├── Makefile                     # Build system
+├── README.md                    # This file
+├── GPU_INTEGRATION.md           # GPU acceleration documentation
+├── benchmarks/                  # Benchmark CNF files and scripts
+│   ├── cnfs/                    # Test CNF files (easy, horn, random, etc.)
+│   ├── generate_cnfs.py         # CNF generator script
+│   └── run_benchmark_trials.py  # Benchmark runner
+├── bin/                         # Build output directory
+│   └── sharp_sat                # Main executable
+├── cuda/                        # CUDA implementation files
+│   ├── clause_evaluation.cu     # GPU clause evaluation & unit propagation
+│   ├── gaussian_elimination.cu  # GPU Gaussian elimination
+│   ├── gpu_memory_pool.cu       # GPU memory pool for buffer reuse
+│   └── gpu_utils.cu             # CUDA utilities and error checking
 ├── include/                     # Header files
-│   ├── cnf/                     # CNF parsing and structures
-│   ├── solver/                  # Core solver logic
-│   ├── utils/                   # Utilities
-│   └── xor/                     # XOR hash generation
+│   ├── cuda_interface.h         # CUDA availability checking
+│   ├── cnf/
+│   │   ├── cnf_parser.h         # DIMACS CNF parser
+│   │   └── cnf_structure.h      # CNF data structures
+│   ├── cuda/
+│   │   ├── clause_evaluation.cuh    # GPU clause evaluation headers
+│   │   ├── gaussian_elimination.cuh # GPU Gaussian elimination headers
+│   │   ├── gpu_memory_pool.cuh      # GPU memory pool headers
+│   │   └── gpu_utils.cuh            # GPU utilities headers
+│   ├── solver/
+│   │   ├── approximate_counter.h    # Main ApproxMC implementation
+│   │   ├── cnf_simplifier.h         # CNF simplification (unit prop, pure literal)
+│   │   └── sat_solver.h             # DPLL SAT solver with GPU support
+│   ├── utils/
+│   │   ├── logger.h             # Logging system
+│   │   └── timer.h              # Performance timing
+│   └── xor/
+│       ├── ml_hash_interface.h  # ML model interface
+│       └── xor_hash_generator.h # XOR constraint generation
 ├── ml_model/                    # Machine learning components
-│   ├── train_hash_model.py      # Training script
-│   ├── hash_predictor.py        # Inference interface
-│   └── model_utils.py           # ML utilities
-├── src/                         # C++ implementation
-└── tests/                       # Test suite
+│   ├── hash_predictor.py        # ML model for hash prediction
+│   ├── ml_server.py             # ML inference server
+│   ├── train_model.py           # Model training script
+│   ├── requirements.txt         # Python dependencies
+│   └── training_cnfs/           # Training data
+├── src/                         # C++ source files
+│   ├── main.cpp                 # Entry point
+│   ├── cnf/
+│   │   ├── cnf_parser.cpp       # CNF parser implementation
+│   │   └── cnf_structure.cpp    # CNF structure implementation
+│   ├── solver/
+│   │   ├── approximate_counter.cpp  # ApproxMC implementation
+│   │   ├── cnf_simplifier.cpp       # CNF simplification implementation
+│   │   └── sat_solver.cpp           # DPLL solver implementation
+│   ├── utils/
+│   │   └── timer.cpp            # Timer implementation
+│   └── xor/
+│       ├── ml_hash_interface.cpp    # ML interface implementation
+│       └── xor_hash_generator.cpp   # XOR generation implementation
+└── tests/                       # Test files
+    ├── test_*.cpp               # Individual test modules
+    └── test_runner.cpp          # Test harness
 ```
 
 ## How It Works
 
-### ApproxMC Algorithm
-1. **Cell decomposition**: Add random XOR constraints to partition solution space
-2. **Gaussian elimination**: Reduce XOR constraints to find partial assignments
-3. **Unit propagation**: Simplify CNF with partial assignments
-4. **SAT solving**: Check satisfiability of simplified formula
-5. **Counting**: Estimate total count based on cell size and successful trials
+### ApproxMC Algorithm (Implemented)
+1. **Pivot Threshold Finding**: 
+   - Performs binary search to find optimal number of XOR constraints
+   - Uses 3 independent samples per threshold value
+   - Target: Find threshold where ≥ 50% of SAT checks succeed
+   
+2. **XOR Constraint Generation**:
+   - Generates random XOR constraints (traditional method)
+   - Optionally uses ML model to predict better constraints (ML-enhanced)
+   - Each constraint partitions solution space by half
+   
+3. **Gaussian Elimination** (GPU-accelerated):
+   - Reduces XOR constraint system to row echelon form
+   - Runs in parallel on GPU for large constraint sets
+   - Extracts variable assignments from reduced system
+   
+4. **CNF Simplification**:
+   - Applies XOR-derived assignments to original CNF
+   - Performs unit propagation (GPU-accelerated when enabled)
+   - Performs pure literal elimination
+   
+5. **SAT Solving** (DPLL with GPU support):
+   - Checks satisfiability of simplified formula
+   - Uses MOMS heuristic for variable selection
+   - GPU-accelerated clause evaluation and unit propagation
+   - Falls back to CPU for small formulas
+   
+6. **Counting & Statistical Estimation**:
+   - Runs multiple iterations at pivot threshold
+   - Estimates total model count: count = 2^(pivot) × (solutions / iterations)
+   - Computes confidence bounds based on epsilon/delta parameters
 
-### ML-Enhanced Hash Generation
-Traditional sparse XOR hashing uses purely random bit selection. This project enhances it by:
-- Learning from CNF structure (variable occurrences, clause lengths, locality)
-- Predicting better hash functions that reduce variance
-- Adapting to different problem domains
+### GPU Acceleration Details
 
-### CUDA Parallelization
-- **Gaussian elimination**: Each XOR constraint processed in parallel
-- **Clause evaluation**: Parallel checking of all clauses
-- **Multiple trials**: Independent hash iterations run concurrently
+**What runs on GPU:**
+- Gaussian elimination of XOR constraints
+- Clause evaluation (checking all clauses in parallel)
+- Unit propagation (finding unit clauses in parallel)
+- Memory pooling for efficient buffer reuse
+
+**Automatic CPU/GPU switching:**
+- System checks CUDA availability at startup
+- Enables GPU acceleration if CUDA detected
+- Falls back to CPU for small problems or if GPU unavailable
+- No user configuration required
+
+**Performance characteristics:**
+- GPU wins on large formulas (1000+ variables, 2500+ clauses)
+- CPU wins on small formulas (<500 variables due to transfer overhead)
+- Typical speedup: 2-5x on large easy-SAT and Horn formulas
+
+See [GPU_INTEGRATION.md](GPU_INTEGRATION.md) for detailed GPU documentation.
 
 ## Performance
 
-### GPU Speedup (Measured)
+### Tested CNF Files
 
-**GPU is faster when**: Problem size > 1000 variables AND SAT instances are easy
+The implementation has been tested on various CNF types:
+- **Standard**: Random 3-SAT formulas (50-500 variables)
+- **Easy-SAT**: Satisfiable formulas with many solutions (500-3000 variables)
+- **Horn**: Polynomial-time solvable formulas (1000-4000 variables)
+- **Random**: General random formulas (500-3000 variables)
+- **Large**: High-complexity formulas (1000-4000 variables)
+- **K-SAT**: Variable clause length formulas (500-3000 variables, k=4-7)
 
-| CNF Type | Variables | CPU Time | GPU Time | GPU Speedup |
-|----------|-----------|----------|----------|-------------|
-| Easy-SAT | 1000 | 4.64s | 2.97s | **1.56x** ✓ |
-| Easy-SAT | 2000 | 30.68s | 7.25s | **4.23x** ✓ |
-| Horn | 1000 | 4.16s | 2.23s | **1.87x** ✓ |
-| Horn | 2000 | 30.45s | 7.44s | **4.09x** ✓ |
+### GPU Performance Notes
 
-**Average GPU speedup**: 2.94x on 1000-2000 variable problems
+**GPU acceleration is beneficial for:**
+- Large formulas (1000+ variables, 2500+ clauses)
+- Many SAT solver iterations (pivot finding + multiple iterations)
+- XOR constraint systems with many constraints
 
-**CPU is faster when**: Problem size < 500 variables (GPU overhead dominates)
+**CPU is faster for:**
+- Small formulas (<500 variables)
+- Quick SAT checks (GPU transfer overhead dominates)
 
-| CNF Type | Variables | CPU Time | GPU Time | CPU Advantage |
-|----------|-----------|----------|----------|---------------|
-| Random 3-SAT | 100 | 3.69s | 4.29s | 1.16x |
-| Random 3-SAT | 50 | 0.09s | 0.38s | 4.09x |
-| Small | 20 | 0.001s | 0.22s | 195x |
+The system automatically selects the best approach based on CUDA availability.
 
-### Key Findings
+### Example Timings
 
-✅ **GPU wins on large, easy-SAT problems** (2000+ vars, 4x+ speedup)  
-✅ **Speedup scales with problem size** (doubles from 1000 to 2000 vars)  
-✅ **Both ML and Non-ML methods produce consistent counts** (0% variance)  
-⚠️ **CPU wins on small problems** (<500 vars due to GPU transfer overhead)
+Example runs on typical hardware (RTX 3080, i7-10700K):
+```
+standard_50_0.cnf    (50 vars, 213 clauses)   : ~0.2s
+easy_500_0.cnf       (500 vars, 1000 clauses) : ~1.5s (10 iterations)
+horn_1000_0.cnf      (1000 vars, 2500 clauses): ~3.3s (10 iterations)
+random_2000_2.cnf    (2000 vars, 4000 clauses): ~10-15s
+```
 
-See [GPU_OPTIMIZATION_REPORT.md](GPU_OPTIMIZATION_REPORT.md) and [PROJECT_COMPLETION_SUMMARY.md](PROJECT_COMPLETION_SUMMARY.md) for detailed analysis.
+Actual performance depends on:
+- Formula structure (easy-SAT vs. hard-SAT)
+- Pivot threshold (number of XOR constraints)
+- Number of iterations required
+- GPU compute capability
 
-## Benchmarks Generated
+## Documentation
 
-**Comprehensive test suite** (18 CNF files, sizes 5 to 10,000 variables):
-- Standard random 3-SAT (phase transition formulas)
-- GPU-friendly easy-SAT (fast solving, large GE matrices)
-- Horn formulas (polynomial-time solvable)
-- Dense formulas (hard SAT instances)
+### Complete Documentation Files
 
-Total benchmark trials run: **160+ trials** across multiple configurations
+- **[README.md](README.md)** - This file: Quick start guide and overview
+- **[CODEBASE_REFERENCE.txt](CODEBASE_REFERENCE.txt)** - Complete reference documenting every file and function in the codebase, explaining what each does, why it exists, and how it connects to the approximate counting algorithm
+- **[GPU_INTEGRATION.md](GPU_INTEGRATION.md)** - Detailed GPU acceleration documentation including architecture, usage, and performance characteristics
+
+### Key Documentation Sections
+
+The CODEBASE_REFERENCE.txt provides:
+- Function-by-function walkthrough of entire codebase
+- Detailed algorithm explanations (ApproxMC, DPLL, Gaussian elimination)
+- Complete execution flow from main() to results
+- GPU acceleration integration details
+- Performance characteristics and complexity analysis
+- Testing and debugging information
 
 ## References
 

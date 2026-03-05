@@ -92,7 +92,7 @@ bool MLHashInterface::start_ml_server() {
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
         
-        execl("/usr/bin/python3", "python3", "ml_model/ml_server.py", nullptr);
+        execl("/usr/bin/python3", "python3", "src/ml_model/ml_server.py", nullptr);
         _exit(1);  // If exec fails
     }
     

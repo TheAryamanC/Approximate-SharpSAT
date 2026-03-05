@@ -14,8 +14,13 @@ ApproximateCounter::ApproximateCounter(const CounterConfig& config)
     
     hash_generator_ = make_unique<XorHashGenerator>(config.seed);
     // Initialize ML interface with model path
-    ml_interface_ = make_unique<MLHashInterface>("ml_model/model.pkl");
-    sat_solver_ = make_unique<SATSolver>(10000);  // max 10k decisions for faster benchmarks
+    ml_interface_ = make_unique<MLHashInterface>("src/ml_model/model.pkl");
+    // Use GPU if available
+    bool use_gpu = sharpsat::cuda::is_cuda_available();
+    sat_solver_ = make_unique<SATSolver>(10000, use_gpu);  // max 10k decisions for faster benchmarks
+    if (use_gpu) {
+        LOG_INFO("SAT solver initialized with GPU acceleration");
+    }
 }
 
 // Main counting interface

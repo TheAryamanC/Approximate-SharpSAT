@@ -5,7 +5,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
-#include "gpu_utils.cuh"
+#include "cuda/gpu_utils.cuh"
 
 namespace sharpsat {
 namespace cuda {

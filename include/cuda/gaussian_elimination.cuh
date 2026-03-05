@@ -31,19 +31,6 @@ bool gaussian_elimination_gpu(
     std::unordered_map<uint32_t, bool>& assignment  // Output: variable assignments
 );
 
-// Parallel Gaussian elimination kernel launcher
-void launch_gaussian_elimination(
-    const uint32_t* d_xor_vars,
-    const uint32_t* d_xor_offsets,
-    const bool* d_xor_rhs,
-    uint32_t num_xors,
-    uint32_t num_variables,
-    uint32_t* d_assignment_vars,
-    bool* d_assignment_values,
-    uint32_t* d_num_assignments,
-    bool* d_has_conflict
-);
-
 // Helper: Convert XOR constraints to GPU format
 void convert_xors_to_gpu_format(
     const std::vector<sharpsat::XorConstraint>& xors,

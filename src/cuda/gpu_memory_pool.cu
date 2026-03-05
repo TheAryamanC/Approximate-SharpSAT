@@ -3,7 +3,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 
-#include "gpu_memory_pool.cuh"
+#include "cuda/gpu_memory_pool.cuh"
 
 namespace sharpsat {
 namespace cuda {

@@ -1,0 +1,1742 @@
+================================================================================
+                    SHARPSAT CODEBASE REFERENCE
+        Complete Function-by-Function Documentation
+================================================================================
+
+This document provides a comprehensive walkthrough of every file and function
+in the SharpSAT approximate model counter, explaining what each function does,
+why it exists, and how it connects to the larger system when you run the
+approximate counter.
+
+================================================================================
+                        ENTRY POINT
+================================================================================
+
+FILE: src/main.cpp
+PURPOSE: Application entry point and command-line interface
+CONNECTS TO: Initializes and runs the approximate counter
+
+--------------------------------------------------------------------------------
+STRUCT: AppConfig (lines 12-22)
+--------------------------------------------------------------------------------
+WHAT: Configuration structure holding application settings
+WHY: Centralizes all user-configurable parameters
+CONNECTS TO: Passed to ApproximateCounter via CounterConfig
+
+FIELDS:
+  - input_file: Path to CNF file to analyze
+  - epsilon: Approximation tolerance (default 0.8)
+  - delta: Confidence parameter (default 0.2)
+  - use_ml: Enable ML-enhanced hash generation
+  - use_cuda: Enable GPU acceleration
+  - seed: Random seed for reproducibility
+  - verbose: Enable debug logging
+  - show_gpu_info: Display GPU capabilities
+
+--------------------------------------------------------------------------------
+FUNCTION: print_usage(const char* prog_name)
+--------------------------------------------------------------------------------
+WHAT: Displays command-line usage instructions
+WHY: Helps users understand available options
+CONNECTS TO: Called when invalid arguments provided or --help requested
+
+--------------------------------------------------------------------------------
+FUNCTION: parse_args(int argc, char** argv, AppConfig& config)
+--------------------------------------------------------------------------------
+WHAT: Parses command-line arguments into AppConfig structure
+WHY: Converts user input into configuration
+CONNECTS TO: Validates and populates AppConfig used by main()
+RETURNS: true if parsing successful, false if help needed or error
+
+PARSING LOGIC:
+  - First argument must be CNF file path
+  - Supports flags: --epsilon, --delta, --use-ml, --no-cuda, --seed, --verbose
+  - Returns false for --help or invalid arguments
+
+--------------------------------------------------------------------------------
+FUNCTION: main(int argc, char** argv)
+--------------------------------------------------------------------------------
+WHAT: Application entry point
+WHY: Orchestrates the entire approximate counting workflow
+CONNECTS TO: This is where execution begins
+
+EXECUTION FLOW:
+1. Print application header
+2. Check CUDA availability, log status
+3. Parse command-line arguments → AppConfig
+4. Show GPU information if requested
+5. Parse CNF file → CNF object
+6. Log CNF statistics (variables, clauses, avg clause size)
+7. Create CounterConfig from AppConfig
+8. Create ApproximateCounter with config
+9. Run counter.count(cnf) → CountResult
+10. Display results (count, bounds, iterations, time)
+11. Return 0 on success, 1 on error
+
+KEY COMPONENTS CALLED:
+  - sharpsat::cuda::is_cuda_available() - Check GPU
+  - CNFParser::parse_file() - Load CNF
+  - ApproximateCounter::count() - Run counting algorithm
+  - Logger for status messages
+
+================================================================================
+                    CNF DATA STRUCTURES
+================================================================================
+
+FILE: include/cnf/cnf_structure.h
+PURPOSE: Core data structures for representing CNF formulas
+CONNECTS TO: Used throughout entire codebase for formula representation
+
+--------------------------------------------------------------------------------
+TYPE ALIASES
+--------------------------------------------------------------------------------
+Variable: uint32_t - Positive integer representing a boolean variable (1-based)
+Literal: int32_t - Signed integer: positive for x, negative for ¬x
+
+--------------------------------------------------------------------------------
+STRUCT: Clause
+--------------------------------------------------------------------------------
+WHAT: Represents a disjunction (OR) of literals
+WHY: Fundamental building block of CNF formulas
+CONNECTS TO: CNF class stores vector of Clauses
+
+FIELDS:
+  - literals: vector<Literal> - List of literals in the clause
+  - is_satisfied: bool - Cached satisfaction status
+
+METHODS:
+  - size() - Number of literals
+  - empty() - Check if clause is empty (always false → UNSAT)
+  - add_literal(lit) - Add a literal to the clause
+
+--------------------------------------------------------------------------------
+STRUCT: XorConstraint
+--------------------------------------------------------------------------------
+WHAT: Represents XOR constraint: x1 ⊕ x2 ⊕ ... ⊕ xn = rhs
+WHY: Used for universal hashing in ApproxMC algorithm
+CONNECTS TO: Generated by XorHashGenerator, processed by Gaussian elimination
+
+FIELDS:
+  - variables: vector<Variable> - Variables in XOR constraint
+  - rhs: bool - Right-hand side (0 or 1)
+
+METHODS:
+  - size() - Number of variables in constraint
+
+XOR CONSTRAINTS IN APPROXMC:
+When you run the approximate counter:
+1. XOR constraints are randomly generated to partition solution space
+2. Each XOR constraint reduces search space by ~50%
+3. Adding m XOR constraints creates ~2^(n-m) cells
+4. SAT solver checks if cell contains solutions
+
+--------------------------------------------------------------------------------
+CLASS: CNF
+--------------------------------------------------------------------------------
+WHAT: Complete CNF formula representation
+WHY: Central data structure for boolean satisfiability problems
+CONNECTS TO: Everything - parsed by CNFParser, simplified by CNFSimplifier,
+             solved by SATSolver, counted by ApproximateCounter
+
+PRIVATE FIELDS:
+  - num_variables_: Number of boolean variables
+  - num_clauses_: Number of clauses
+  - clauses_: Vector of all clauses
+  - variable_occurrences_: Count of how often each variable appears
+  - positive_occurrences_: Count of positive literal occurrences per var
+  - negative_occurrences_: Count of negative literal occurrences per var
+
+PUBLIC METHODS:
+
+CNF() - Constructor
+  WHAT: Creates empty CNF
+  WHY: Starting point before parsing
+  CONNECTS TO: CNFParser populates this
+
+num_variables() / num_clauses() - Getters
+  WHAT: Return formula dimensions
+  WHY: Needed for allocation, iteration, statistics
+  CONNECTS TO: Used everywhere - SAT solver, hash generator, etc.
+
+clauses() - Get clause vector
+  WHAT: Returns reference to clause list
+  WHY: Allow iteration and modification
+  CONNECTS TO: SAT solver iterates clauses, simplifier modifies them
+
+add_clause(clause) / add_clause(literals)
+  WHAT: Adds new clause to formula
+  WHY: Building CNF during parsing or transformation
+  CONNECTS TO: Called by CNFParser when reading DIMACS file
+
+set_num_variables(n)
+  WHAT: Sets variable count
+  WHY: CNF parser reads this from DIMACS header
+  CONNECTS TO: CNFParser::parse_file()
+
+compute_variable_occurrences()
+  WHAT: Counts how many times each variable appears in clauses
+  WHY: Used by SAT solver heuristics (MOMS) and hash generation
+  CONNECTS TO: Called after parsing, before solving
+  ALGORITHM:
+    - Iterate all clauses
+    - For each literal, increment count for var(literal)
+    - Separately track positive and negative occurrences
+
+get_variable_occurrences() / get_positive_occurrences() / get_negative_occurrences()
+  WHAT: Access occurrence statistics
+  WHY: SAT solver uses for variable selection heuristic
+  CONNECTS TO: SATSolver::choose_variable() uses MOMS heuristic
+
+has_empty_clause()
+  WHAT: Checks if any clause is empty
+  WHY: Empty clause means formula is UNSAT
+  CONNECTS TO: Used in DPLL: if empty clause exists, backtrack immediately
+
+is_empty()
+  WHAT: Checks if formula has no clauses
+  WHY: Empty formula (no clauses) is trivially SAT
+  CONNECTS TO: ApproximateCounter handles as special case (count = 2^n)
+
+avg_clause_size() / max_clause_size()
+  WHAT: Compute clause length statistics
+  WHY: Diagnostic information, logged to user
+  CONNECTS TO: main.cpp logs this after parsing
+
+apply_assignment(assignment)
+  WHAT: Simplifies CNF by setting variables to true/false
+  WHY: Core operation in DPLL and XOR constraint application
+  CONNECTS TO: Called by SAT solver during unit propagation and after
+               Gaussian elimination
+  ALGORITHM:
+    - For each clause:
+      - Check if any literal satisfied by assignment → mark clause satisfied
+      - Remove falsified literals from clause
+      - If clause becomes empty → formula is UNSAT
+    - Remove satisfied clauses from formula
+
+clone()
+  WHAT: Creates deep copy of CNF
+  WHY: SAT solver needs to modify CNF without affecting original
+  CONNECTS TO: ApproximateCounter clones CNF before each SAT check
+
+--------------------------------------------------------------------------------
+HELPER FUNCTION: var(Literal lit)
+--------------------------------------------------------------------------------
+WHAT: Extracts variable from literal
+WHY: Convert signed literal to unsigned variable
+CONNECTS TO: Used throughout codebase
+EXAMPLE: var(5) = 5, var(-5) = 5
+
+--------------------------------------------------------------------------------
+HELPER FUNCTION: sign(Literal lit)
+--------------------------------------------------------------------------------
+WHAT: Extracts sign from literal
+WHY: Determine if literal is positive or negated
+CONNECTS TO: Used in clause evaluation
+EXAMPLE: sign(5) = true, sign(-5) = false
+
+================================================================================
+FILE: src/cnf/cnf_structure.cpp
+PURPOSE: Implementation of CNF class methods
+CONNECTS TO: Provides functionality used throughout codebase
+================================================================================
+
+All methods documented above under CNF class are implemented here.
+
+KEY IMPLEMENTATION DETAILS:
+
+add_clause():
+  - Pushes clause to clauses_ vector
+  - Increments num_clauses_
+  - Each literal updates variable_occurrences_
+
+apply_assignment():
+  - Uses two-phase approach: first mark satisfied, then remove literals
+  - Preserves clause indices during iteration
+  - Checks for empty clauses (UNSAT condition)
+
+compute_variable_occurrences():
+  - Resizes occurrence vectors to num_variables_ + 1 (1-based indexing)
+  - Single pass through all clauses and literals
+  - O(total_literals) time complexity
+
+================================================================================
+                        CNF PARSING
+================================================================================
+
+FILE: include/cnf/cnf_parser.h
+PURPOSE: Parse CNF files in DIMACS format
+CONNECTS TO: main() uses this to load CNF from file
+
+--------------------------------------------------------------------------------
+CLASS: CNFParser
+--------------------------------------------------------------------------------
+WHAT: Parses DIMACS CNF format files
+WHY: Standard format for CNF formulas
+CONNECTS TO: main() calls parse_file() at startup
+
+DIMACS FORMAT:
+  c Comment lines start with 'c'
+  p cnf <num_vars> <num_clauses>
+  <lit1> <lit2> ... 0   (clause, terminated by 0)
+  <lit1> <lit2> ... 0
+  ...
+
+METHODS:
+
+static parse_file(filename) → CNF
+  WHAT: Loads and parses CNF from file
+  WHY: Primary interface for loading formulas
+  CONNECTS TO: main() calls this to get CNF object
+  ALGORITHM:
+    1. Open file, check for errors
+    2. Read line by line
+    3. Skip comment lines (start with 'c')
+    4. Parse header "p cnf n m" to get variable/clause count
+    5. Parse clause lines: space-separated literals ending with 0
+    6. Build CNF object
+  RETURNS: Fully constructed CNF object
+  THROWS: runtime_error if file not found or format invalid
+
+static parse_string(str) → CNF
+  WHAT: Parses CNF from string
+  WHY: Useful for testing
+  CONNECTS TO: Test suite uses this
+
+static parse_header(line, num_variables, num_clauses) → bool
+  WHAT: Parses "p cnf n m" header line
+  WHY: Get formula dimensions before parsing clauses
+  CONNECTS TO: Called internally by parse_file()
+
+static parse_clause_line(line, literals) → bool
+  WHAT: Parses clause from space-separated literals
+  WHY: Each line after header is a clause
+  CONNECTS TO: Called for each non-comment, non-header line
+  ALGORITHM:
+    - Split line by whitespace
+    - Convert each token to int32_t (literal)
+    - Stop at 0 (clause terminator)
+    - Return false if 0 not found
+
+FILE: src/cnf/cnf_parser.cpp
+PURPOSE: Implementation of CNFParser methods
+
+ROBUST ERROR HANDLING:
+  - Checks file existence
+  - Validates header format
+  - Ensures clauses end with 0
+  - Matches actual clause count to declared count
+
+================================================================================
+                    CNF SIMPLIFICATION
+================================================================================
+
+FILE: include/solver/cnf_simplifier.h
+PURPOSE: CNF preprocessing and simplification
+CONNECTS TO: Used by SATSolver during DPLL search
+
+--------------------------------------------------------------------------------
+CLASS: CNFSimplifier
+--------------------------------------------------------------------------------
+WHAT: Implements CNF simplification techniques
+WHY: Reduce formula size before SAT solving → faster solving
+CONNECTS TO: SATSolver calls simplify() before DPLL, unit_propagate() during DPLL
+
+METHODS:
+
+simplify(cnf, assignment) → bool
+  WHAT: Applies all simplification techniques
+  WHY: One-stop method for CNF reduction
+  CONNECTS TO: Main simplification entry point
+  ALGORITHM:
+    1. Apply unit propagation until fixpoint
+    2. Apply pure literal elimination
+    3. Return false if conflict detected
+  RETURNS: true if formula still potentially SAT, false if UNSAT detected
+
+unit_propagate(cnf, assignment) → bool
+  WHAT: Finds unit clauses and propagates their implications
+  WHY: Core DPLL technique - forces variables to satisfy unit clauses
+  CONNECTS TO: Called repeatedly during DPLL search
+  
+  WHAT IS UNIT PROPAGATION:
+    - Unit clause: clause with only ONE literal
+    - That literal MUST be true for formula to be SAT
+    - Set variable accordingly, simplify formula
+  
+  ALGORITHM:
+    1. Find all unit clauses (size == 1)
+    2. For each unit clause:
+       a. Extract literal
+       b. Assign variable to satisfy literal
+       c. Apply assignment to CNF
+       d. Check for empty clauses (UNSAT)
+    3. Repeat until no more unit clauses (fixpoint)
+  
+  WHY THIS WORKS:
+    - Unit clauses have no choice - literal must be true
+    - Propagation is sound and complete for unit clauses
+    - Reduces search space significantly
+  
+  CONNECTS TO: SATSolver::dpll() calls this at every node
+  RETURNS: false if empty clause detected (UNSAT), true otherwise
+
+pure_literal_elimination(cnf, assignment) → bool
+  WHAT: Finds pure literals and assigns them
+  WHY: Simplification technique - safe to assign pure literals
+  
+  WHAT IS PURE LITERAL:
+    - Variable that appears only positive OR only negative in formula
+    - Can safely assign it to satisfy all occurrences
+  
+  ALGORITHM:
+    1. Count positive and negative occurrences of each variable
+    2. For each variable:
+       - If only positive occurrences: assign true
+       - If only negative occurrences: assign false
+    3. Apply assignments to CNF
+  
+  CONNECTS TO: Called by simplify() once before DPLL
+  RETURNS: Always true (pure literal elimination can't cause conflicts)
+
+find_unit_clauses(cnf) → vector<Literal>
+  WHAT: Finds all unit clauses in formula
+  WHY: Helper for unit_propagate()
+  CONNECTS TO: Internal use
+  RETURNS: List of literals from unit clauses
+
+FILE: src/solver/cnf_simplifier.cpp
+PURPOSE: Implementation of CNFSimplifier methods
+
+IMPLEMENTATION NOTES:
+  - unit_propagate() uses fixpoint iteration (while loop)
+  - Checks for empty clauses after each assignment
+  - pure_literal_elimination() scans entire formula once
+
+================================================================================
+                        SAT SOLVER
+================================================================================
+
+FILE: include/solver/sat_solver.h
+PURPOSE: DPLL-based SAT solver with GPU acceleration support
+CONNECTS TO: Core component - determines satisfiability during counting
+
+--------------------------------------------------------------------------------
+CLASS: SATSolver
+--------------------------------------------------------------------------------
+WHAT: Complete SAT solver using DPLL algorithm
+WHY: ApproximateCounter needs to check satisfiability with XOR constraints
+CONNECTS TO: ApproximateCounter creates SATSolver and calls solve() repeatedly
+
+PRIVATE FIELDS:
+  - max_decisions_: Limit on number of decisions (prevents infinite loops)
+  - timeout_seconds_: Time limit for solving
+  - num_decisions_: Counter of decisions made (statistics)
+  - num_conflicts_: Counter of conflicts encountered (statistics)
+  - use_gpu_: Whether to use GPU acceleration for clause evaluation
+  - simplifier_: CNFSimplifier instance for unit propagation
+
+CONSTRUCTORS:
+
+SATSolver()
+  WHAT: Default constructor
+  WHY: Create solver with default settings
+  CONNECTS TO: Can create and configure separately
+  DEFAULT VALUES: max_decisions=1000000, timeout=300s, use_gpu=false
+
+SATSolver(max_decisions)
+  WHAT: Constructor with decision limit
+  WHY: Limit solving time for approximate counting
+  CONNECTS TO: Approximate counting doesn't need exact solutions
+
+SATSolver(max_decisions, use_gpu)
+  WHAT: Constructor with decision limit and GPU flag
+  WHY: Enable GPU acceleration when CUDA available
+  CONNECTS TO: ApproximateCounter uses this constructor
+  WHEN CALLED: ApproximateCounter constructor checks CUDA availability
+              and passes use_gpu=true if GPU detected
+
+PUBLIC METHODS:
+
+solve(cnf) → bool
+  WHAT: Check if CNF is satisfiable (no partial assignment)
+  WHY: Simple interface for pure SAT checking
+  CONNECTS TO: Entry point for basic SAT queries
+  ALGORITHM: Creates empty assignment, calls solve(cnf, assignment)
+
+solve(cnf, partial_assignment) → bool
+  WHAT: Check satisfiability with some variables already assigned
+  WHY: ApproximateCounter assigns variables from XOR constraints, then checks SAT
+  CONNECTS TO: Called by ApproximateCounter::check_sat_with_xors()
+  
+  ALGORITHM:
+    1. Clone CNF (don't modify original)
+    2. Apply partial_assignment to cloned CNF
+    3. Check for empty formula (trivially SAT)
+    4. Check for empty clause (immediately UNSAT)
+    5. Simplify CNF (unit propagation + pure literal elimination)
+    6. Run DPLL search
+    7. Return result
+  
+  PARAMETERS:
+    - cnf: Formula to solve
+    - partial_assignment: Variables already assigned (from XOR constraints)
+  
+  RETURNS: true if SAT, false if UNSAT
+
+set_max_decisions(n) / get_max_decisions()
+  WHAT: Configure decision limit
+  WHY: Control solving time vs. accuracy tradeoff
+  CONNECTS TO: Can tune for different use cases
+
+set_timeout(seconds) / get_timeout()
+  WHAT: Configure time limit
+  WHY: Prevent solver from running too long
+  CONNECTS TO: Default 300 seconds
+
+reset_statistics()
+  WHAT: Reset decision and conflict counters
+  WHY: Get fresh statistics for each solve() call
+  CONNECTS TO: Called at start of solve()
+
+get_num_decisions() / get_num_conflicts()
+  WHAT: Access solver statistics
+  WHY: Understand solver behavior and difficulty
+  CONNECTS TO: Could be logged or analyzed
+
+set_use_gpu(use_gpu) / get_use_gpu()
+  WHAT: Enable/disable GPU acceleration
+  WHY: Allow runtime control of GPU usage
+  CONNECTS TO: ApproximateCounter sets this based on CUDA availability
+
+PRIVATE METHODS:
+
+dpll(cnf, assignment) → bool
+  WHAT: Core DPLL algorithm implementation
+  WHY: The actual SAT solving logic
+  CONNECTS TO: Called by solve() after initial simplification
+  
+  DPLL ALGORITHM:
+    1. Check decision limit
+    2. Perform unit propagation (CPU or GPU based on use_gpu_)
+    3. Check if formula is empty (SAT)
+    4. Check if formula is satisfied (SAT)
+    5. Choose branching variable using heuristic
+    6. Try assignment = true:
+       a. Recursively solve with this assignment
+       b. If SAT, return true
+    7. Try assignment = false:
+       a. Recursively solve with this assignment
+       b. If SAT, return true
+    8. Both branches failed → return false (UNSAT)
+  
+  GPU ACCELERATION:
+    If use_gpu_=true and CUDA available:
+      - Convert clauses to GPU format (flat arrays)
+      - Call cuda::unit_propagation_gpu() for parallel unit propagation
+      - Falls back to CPU if GPU call fails
+    Else:
+      - Use CNFSimplifier::unit_propagate() on CPU
+  
+  WHY GPU HELPS:
+    - Unit propagation checks many clauses in parallel
+    - Large formulas (1000+ clauses) benefit from parallelization
+    - Each clause evaluation is independent
+  
+  RETURNS: true if SAT found, false if UNSAT or decision limit reached
+
+choose_variable(cnf, assignment) → Variable
+  WHAT: Select next variable to branch on
+  WHY: Heuristic impacts DPLL efficiency dramatically
+  CONNECTS TO: Called by dpll() when branching needed
+  
+  HEURISTIC: MOMS (Maximum Occurrences in Clauses of Minimum Size)
+    1. Find minimum clause size s
+    2. Count occurrences of each unassigned variable in clauses of size s
+    3. Choose variable with maximum count
+  
+  WHY MOMS:
+    - Focus on smallest clauses (closer to unit clauses)
+    - Variables in small clauses constrain formula more
+    - Often outperforms simple heuristics
+  
+  FALLBACK: If no variables in minimum clauses, pick first unassigned variable
+  
+  RETURNS: Variable to branch on, or 0 if all assigned
+
+FILE: src/solver/sat_solver.cpp
+PURPOSE: Implementation of SATSolver
+
+KEY IMPLEMENTATION DETAILS:
+
+GPU INTEGRATION IN dpll():
+  - Checks use_gpu_ && sharpsat::cuda::is_cuda_available()
+  - Converts CNF to flat format: vector<int32_t> literals, vector<uint32_t> offsets
+  - Calls cuda::unit_propagation_gpu(...) 
+  - If conflict detected, returns false
+  - Applies resulting assignments to CNF
+
+CPU PATH IN dpll():
+  - Calls simplifier_.unit_propagate(cnf, assignment)
+  - If returns false, propagates conflict (returns false)
+
+choose_variable() IMPLEMENTATION:
+  - First pass: find minimum clause size
+  - Second pass: count variable occurrences in minimum-size clauses
+  - Select variable with maximum count
+  - O(clauses) time complexity
+
+================================================================================
+                    APPROXIMATE COUNTING
+================================================================================
+
+FILE: include/solver/approximate_counter.h
+PURPOSE: Main approximate model counting algorithm (ApproxMC)
+CONNECTS TO: This is the core algorithm that main() calls
+
+--------------------------------------------------------------------------------
+STRUCT: CounterConfig
+--------------------------------------------------------------------------------
+WHAT: Configuration for approximate counting algorithm
+WHY: Centralize all algorithm parameters
+CONNECTS TO: Created in main(), passed to ApproximateCounter constructor
+
+FIELDS:
+  - epsilon: Approximation tolerance (default 0.8)
+    WHY: Controls accuracy vs. speed tradeoff
+    MEANING: Result is within factor e^epsilon with probability 1-delta
+  
+  - delta: Confidence parameter (default 0.2)
+    WHY: Controls confidence level
+    MEANING: Algorithm succeeds with probability 1-delta (80% confidence)
+  
+  - seed: Random seed (default 42)
+    WHY: Reproducibility
+  
+  - use_ml_hashes: Use ML-enhanced hash generation (default false)
+    WHY: Experimental feature to reduce variance
+  
+  - use_cuda: Enable CUDA acceleration (default true)
+    WHY: Speed up on compatible hardware
+  
+  - pivot_threshold: Threshold for SAT checks (default 9.0)
+    WHY: Used in pivot finding algorithm
+  
+  - max_iterations: Maximum iterations (default 10)
+    WHY: Limit running time
+
+--------------------------------------------------------------------------------
+STRUCT: CountResult
+--------------------------------------------------------------------------------
+WHAT: Result of approximate counting
+WHY: Return multiple metrics from counting
+CONNECTS TO: Returned by ApproximateCounter::count(), displayed in main()
+
+FIELDS:
+  - count: Estimated model count
+  - lower_bound: Lower confidence bound
+  - upper_bound: Upper confidence bound
+  - num_iterations: Iterations performed
+  - time_seconds: Total time taken
+  - successful: Whether counting succeeded
+
+--------------------------------------------------------------------------------
+CLASS: ApproximateCounter
+--------------------------------------------------------------------------------
+WHAT: Complete ApproxMC implementation
+WHY: Approximate counting is intractable exactly - this provides fast estimates
+CONNECTS TO: Main algorithm called by main()
+
+PRIVATE FIELDS:
+  - config_: CounterConfig with algorithm parameters
+  - hash_generator_: XorHashGenerator for random XOR constraints
+  - ml_interface_: MLHashInterface for ML-enhanced hashing
+  - sat_solver_: SATSolver for satisfiability checks
+
+CONSTRUCTOR:
+
+ApproximateCounter(config)
+  WHAT: Initialize counter with configuration
+  WHY: Set up all components
+  CONNECTS TO: Called by main() with user-provided config
+  
+  INITIALIZATION:
+    1. Store config
+    2. Create XorHashGenerator with seed
+    3. Create MLHashInterface with model path "ml_model/model.pkl"
+    4. Check if CUDA available
+    5. Create SATSolver with max_decisions=10000 and GPU flag
+    6. Log if GPU acceleration enabled
+
+PUBLIC METHODS:
+
+count(cnf) → CountResult
+  WHAT: Main entry point for approximate counting
+  WHY: User-facing API
+  CONNECTS TO: Called by main() with parsed CNF
+  
+  ALGORITHM:
+    1. Start timer
+    2. Log formula information
+    3. Call approxmc(cnf) - core algorithm
+    4. Stop timer, set result.time_seconds
+    5. Log results
+    6. Return CountResult
+  
+  RETURNS: Complete counting results
+
+set_config(config) / get_config()
+  WHAT: Update/access configuration
+  WHY: Allow reconfiguration between runs
+  CONNECTS TO: Could change parameters dynamically
+
+PRIVATE METHODS:
+
+approxmc(cnf) → CountResult
+  WHAT: Core ApproxMC algorithm implementation
+  WHY: Heart of approximate counting
+  CONNECTS TO: Called by count()
+  
+  APPROXMC ALGORITHM EXPLAINED:
+  
+  The goal: Estimate |Solutions(CNF)| efficiently
+  
+  Key insight: Instead of counting exactly, partition solution space into
+  cells of roughly equal size, sample cells, estimate from sample.
+  
+  How: Use random XOR constraints as universal hash functions
+    - Each XOR constraint partitions solutions into 2 sets
+    - m XOR constraints create ~2^m cells
+    - Each cell has ~|Solutions|/2^m solutions
+  
+  ALGORITHM STEPS:
+  
+  1. HANDLE TRIVIAL CASES:
+     - Empty formula (no clauses): count = 2^n (all assignments SAT)
+     - Empty clause present: count = 0 (UNSAT)
+  
+  2. FIND PIVOT THRESHOLD m:
+     Goal: Find largest m such that formula+XORs is SAT with good probability
+     Why: We want cells to be non-empty but small
+     Method: Binary search (see find_pivot_threshold())
+     Typical range: m = 0 to n (number of variables)
+  
+  3. RUN MULTIPLE ITERATIONS:
+     Number of iterations = f(epsilon, delta): 3 * ln(3/delta) / epsilon^2
+     But capped at max_iterations (default 10)
+     
+     For each iteration:
+       a. Generate m random XOR constraints
+       b. Check SAT with these constraints
+       c. Count successful SAT checks
+  
+  4. ESTIMATE COUNT:
+     sat_prob = (# SAT iterations) / (total iterations)
+     cell_size = 2^(n - m)   (each cell has this many possible assignments)
+     count = cell_size * pivot_threshold
+     
+     Intuition: If X% of random cells are SAT, total count ≈ X% * 2^n
+  
+  5. COMPUTE CONFIDENCE BOUNDS:
+     Based on statistical analysis of ApproxMC algorithm
+     Bounds depend on epsilon, delta parameters
+  
+  SPECIAL CASES:
+    - If pivot = 0: Formula likely UNSAT, return count = 0
+    - If all iterations UNSAT: count is very small, estimate 2^(n-m-1)
+  
+  RETURNS: CountResult with all metrics
+
+find_pivot_threshold(cnf) → uint32_t
+  WHAT: Binary search to find optimal XOR constraint count
+  WHY: Need right number of constraints - too few: expensive SAT, too many: all UNSAT
+  CONNECTS TO: Called by approxmc() once per counting run
+  
+  GOAL: Find largest m such that CNF + m XOR constraints is SAT with probability 30-80%
+  
+  ALGORITHM:
+    1. Initialize binary search: left=0, right=num_variables
+    2. While left <= right:
+       a. mid = (left + right) / 2
+       b. Generate m=mid XOR constraints
+       c. Run 3 SAT samples with different XOR constraint sets
+       d. Compute SAT probability: (# SAT samples) / 3
+       e. If sat_prob > 0.8: too easy, increase m (left = mid+1)
+       f. If sat_prob < 0.3: too hard, decrease m (right = mid-1)
+       g. If 0.3 <= sat_prob <= 0.8: found good threshold, break
+    3. Return pivot m
+  
+  WHY 30-80% RANGE:
+    - Too high (>80%): Not partitioning enough, expensive SAT checks
+    - Too low (<30%): Over-partitioning, few SAT samples, high variance
+    - Sweet spot: Enough constraint to reduce search, enough SAT to estimate
+  
+  OPTIMIZATION: Uses only 3 samples per threshold (vs. 10 in some implementations)
+    Why: Faster pivot finding, sufficient for good threshold estimate
+  
+  RETURNS: Pivot threshold m (number of XOR constraints)
+
+check_sat_with_xors(cnf, xors, assignment) → bool
+  WHAT: Check if CNF with XOR constraints is satisfiable
+  WHY: Core operation in ApproxMC - need to test constrained formula
+  CONNECTS TO: Called by approxmc() and find_pivot_threshold()
+  
+  ALGORITHM:
+    1. Apply XOR constraints via Gaussian elimination → partial assignment
+    2. Clone original CNF
+    3. Apply partial assignment from XORs to cloned CNF
+    4. Check if empty clause appeared (immediate UNSAT)
+    5. Call SAT solver on simplified CNF
+    6. Return SAT result
+  
+  WHY THIS WORKS:
+    - XOR constraints are linear equations over GF(2)
+    - Gaussian elimination solves the system
+    - Solution gives values for some variables
+    - Remaining variables solved by SAT solver
+  
+  PARAMETERS:
+    - cnf: Original formula
+    - xors: List of XOR constraints to add
+    - assignment: Output parameter - will contain satisfying assignment if SAT
+  
+  RETURNS: true if SAT, false if UNSAT
+
+apply_xor_constraints(xors, num_variables) → unordered_map<Variable, bool>
+  WHAT: Solve XOR constraint system via Gaussian elimination
+  WHY: XOR constraints are linear system - can solve efficiently
+  CONNECTS TO: Called by check_sat_with_xors()
+  
+  HOW IT WORKS:
+    XOR constraints form matrix over GF(2):
+      x1 ⊕ x3 ⊕ x5 = 1  →  [1 0 1 0 1 | 1]
+      x2 ⊕ x4 = 0        →  [0 1 0 1 0 | 0]
+      ...
+    
+    Gaussian elimination reduces to row echelon form:
+      Each row gives one variable assignment
+      Example: [0 0 1 0 0 | 1] means x3 = 1
+  
+  ALGORITHM:
+    1. Build constraint matrix
+    2. Call cuda::gaussian_elimination_gpu() if CUDA available
+       Otherwise use CPU version
+    3. Extract variable assignments from reduced matrix
+    4. Return assignment map
+  
+  GPU ACCELERATION:
+    - Each row operation is independent
+    - GPU processes multiple rows in parallel
+    - Significant speedup for large XOR systems (100+ constraints)
+  
+  RETURNS: Partial assignment (some variables assigned, others free)
+
+compute_bounds(threshold, num_variables, result)
+  WHAT: Calculate confidence bounds on count estimate
+  WHY: Communicate uncertainty to user
+  CONNECTS TO: Called by approxmc() after computing count
+  
+  ALGORITHM:
+    Based on ApproxMC theoretical analysis:
+      lower = count / (1 + e^epsilon)
+      upper = count * (1 + e^epsilon)
+    
+    These bounds hold with probability 1-delta
+  
+  MODIFIES: result.lower_bound and result.upper_bound
+
+FILE: src/solver/approximate_counter.cpp
+PURPOSE: Implementation of ApproximateCounter
+
+FULL IMPLEMENTATION DETAILS:
+  - approxmc() handles edge cases carefully (empty formula, UNSAT)
+  - find_pivot_threshold() uses adaptive binary search
+  - Logs progress for transparency
+  - Integrates ML hashes if config.use_ml_hashes=true
+
+================================================================================
+                    XOR HASH GENERATION
+================================================================================
+
+FILE: include/xor/xor_hash_generator.h
+PURPOSE: Generate random XOR constraints for universal hashing
+CONNECTS TO: Used by ApproximateCounter to partition solution space
+
+--------------------------------------------------------------------------------
+CLASS: XorHashGenerator
+--------------------------------------------------------------------------------
+WHAT: Generates random sparse XOR constraints
+WHY: Universal hashing core to ApproxMC algorithm
+CONNECTS TO: ApproximateCounter creates instance, calls generate_random_hashes()
+
+PRIVATE FIELDS:
+  - rng_: Random number generator (std::mt19937_64)
+  - seed_: Random seed
+
+CONSTRUCTOR:
+
+XorHashGenerator(seed)
+  WHAT: Initialize generator with seed
+  WHY: Reproducibility - same seed gives same XOR constraints
+  CONNECTS TO: ApproximateCounter passes config.seed
+
+PUBLIC METHODS:
+
+generate_random_hashes(num_variables, num_hashes, sparsity) → vector<XorConstraint>
+  WHAT: Generate multiple random XOR constraints
+  WHY: Need many XOR constraints for pivot threshold
+  CONNECTS TO: Called by ApproximateCounter during pivot finding and iterations
+  
+  PARAMETERS:
+    - num_variables: Total variables in CNF
+    - num_hashes: How many XOR constraints to generate
+    - sparsity: Probability each variable appears in constraint (default 0.5)
+  
+  ALGORITHM:
+    For i = 1 to num_hashes:
+      1. Generate random XOR constraint using generate_single_hash()
+      2. Add to list
+    Return list
+  
+  SPARSITY EXPLANATION:
+    - sparsity=0.5: Each variable has 50% chance of appearing in XOR
+    - sparsity=0.2: Sparse XORs with ~20% of variables (faster GE)
+    - sparsity=1.0: Dense XORs with all variables
+  
+  WHY SPARSE:
+    - Sparse XOR systems solve faster (Gaussian elimination)
+    - Still provide good universal hashing properties
+    - Typical: 30-50% sparsity
+  
+  RETURNS: List of XorConstraint objects
+
+generate_single_hash(num_variables, sparsity) → XorConstraint
+  WHAT: Generate one random XOR constraint
+  WHY: Building block for generate_random_hashes()
+  CONNECTS TO: Called internally
+  
+  ALGORITHM:
+    1. For each variable v in 1..num_variables:
+       - Generate random number r in [0,1]
+       - If r < sparsity: include v in XOR
+    2. Generate random RHS (0 or 1)
+    3. Return XorConstraint(variables, RHS)
+  
+  EXAMPLE:
+    num_variables=5, sparsity=0.5 might produce:
+      x2 ⊕ x3 ⊕ x5 = 1
+    (variables 2,3,5 included, 1,4 excluded)
+
+static get_recommended_sparsity(num_variables) → double
+  WHAT: Compute good sparsity value for formula size
+  WHY: Heuristic to balance speed vs. hashing quality
+  CONNECTS TO: ApproximateCounter calls this to set sparsity
+  
+  HEURISTIC:
+    - Small formulas (< 100 vars): sparsity = 0.5 (denser)
+    - Large formulas (> 1000 vars): sparsity = 0.2-0.3 (sparser)
+    - Linear interpolation in between
+  
+  WHY:
+    - Large formulas: sparse XOR for fast GE
+    - Small formulas: dense XOR for better hashing
+  
+  RETURNS: Recommended sparsity value
+
+FILE: src/xor/xor_hash_generator.cpp
+PURPOSE: Implementation of XorHashGenerator
+
+IMPLEMENTATION NOTES:
+  - Uses std::uniform_real_distribution for sparsity sampling
+  - Uses std::uniform_int_distribution for RHS generation
+  - Ensures reproducibility via seeded RNG
+
+================================================================================
+FILE: include/xor/ml_hash_interface.h
+PURPOSE: Interface to ML model for enhanced hash generation
+CONNECTS TO: Optional feature to improve XOR constraint quality
+
+--------------------------------------------------------------------------------
+CLASS: MLHashInterface
+--------------------------------------------------------------------------------
+WHAT: Wrapper for Python ML model that predicts good XOR constraints
+WHY: ML can learn better hashing schemes than pure random
+CONNECTS TO: ApproximateCounter creates instance, uses if config.use_ml_hashes=true
+
+PRIVATE FIELDS:
+  - model_path_: Path to trained ML model (pickle file)
+  - model_loaded_: Whether model successfully loaded
+  - fallback_generator_: XorHashGenerator for when ML unavailable
+
+CONSTRUCTOR:
+
+MLHashInterface(model_path)
+  WHAT: Initialize interface and load ML model
+  WHY: Set up for ML-enhanced generation
+  CONNECTS TO: ApproximateCounter constructs with "ml_model/model.pkl"
+  
+  INITIALIZATION:
+    1. Store model path
+    2. Attempt to load Python model
+    3. If load fails: log warning, set model_loaded_=false
+    4. Create fallback_generator_ for when ML unavailable
+
+PUBLIC METHODS:
+
+generate_ml_hashes(cnf, num_hashes) → vector<XorConstraint>
+  WHAT: Generate XOR constraints using ML model
+  WHY: Potentially better than random (lower variance)
+  CONNECTS TO: Called by ApproximateCounter when use_ml_hashes=true
+  
+  ALGORITHM:
+    1. Extract CNF features:
+       - num_variables, num_clauses
+       - avg_clause_size
+       - variable_occurrences
+    2. If model_loaded_:
+       a. Call Python model with features
+       b. Model predicts good variable selections
+       c. Build XOR constraints from predictions
+    3. Else (model not loaded):
+       a. Fall back to random generation
+       b. Use fallback_generator_.generate_random_hashes()
+  
+  ML MODEL:
+    - Trained on past formulas and XOR constraint effectiveness
+    - Learns which variable patterns produce low-variance estimates
+    - Can adapt to formula structure (dense, sparse, structured, random)
+  
+  FALLBACK:
+    Always works even if ML unavailable - degrades gracefully to random
+  
+  RETURNS: List of XorConstraint objects
+
+is_model_loaded() → bool
+  WHAT: Check if ML model successfully loaded
+  WHY: Know whether ML generation is active
+  CONNECTS TO: Can be used for diagnostics
+
+FILE: src/xor/ml_hash_interface.cpp
+PURPOSE: Implementation of MLHashInterface
+
+IMPLEMENTATION NOTES:
+  - Uses Python C API or subprocess to call model
+  - Handles model loading errors gracefully
+  - Logs when falling back to random generation
+
+================================================================================
+                        GPU ACCELERATION
+================================================================================
+
+FILE: include/cuda_interface.h
+PURPOSE: CUDA availability checking
+CONNECTS TO: main() and ApproximateCounter check before using GPU
+
+--------------------------------------------------------------------------------
+FUNCTION: sharpsat::cuda::is_cuda_available() → bool
+--------------------------------------------------------------------------------
+WHAT: Check if CUDA is available and functional
+WHY: Enable GPU features only when hardware supports it
+CONNECTS TO: Called by main() at startup, ApproximateCounter in constructor
+
+CHECKS:
+  1. CUDA runtime installed
+  2. CUDA driver loaded
+  3. At least one GPU device available
+  4. Device has sufficient compute capability (7.5+)
+
+RETURNS: true if all checks pass, false otherwise
+
+FILE: include/cuda/gpu_utils.cuh
+PURPOSE: CUDA utility functions and error checking
+CONNECTS TO: Used by all CUDA code for error handling
+
+--------------------------------------------------------------------------------
+MACRO: CUDA_CHECK(call)
+--------------------------------------------------------------------------------
+WHAT: Wrapper for CUDA API calls with error checking
+WHY: CUDA errors are silent by default - this makes them visible
+CONNECTS TO: Every CUDA API call wrapped in this macro
+
+USAGE:
+  CUDA_CHECK(cudaMalloc(&ptr, size));
+  
+BEHAVIOR:
+  - If call succeeds: continue normally
+  - If call fails: Log error, throw exception
+
+--------------------------------------------------------------------------------
+FUNCTION: cuda::get_cuda_error_string(cudaError_t error) → string
+--------------------------------------------------------------------------------
+WHAT: Convert CUDA error code to human-readable string
+WHY: Better error messages
+CONNECTS TO: Used by CUDA_CHECK macro
+
+FILE: cuda/gpu_utils.cu
+PURPOSE: Implementation of CUDA utilities
+
+IMPLEMENTATION:
+  - Wraps cudaGetErrorString()
+  - Adds context information
+  - Logs to Logger
+
+================================================================================
+FILE: include/cuda/gpu_memory_pool.cuh
+PURPOSE: Memory pool for efficient GPU buffer reuse
+CONNECTS TO: Used by clause evaluation and Gaussian elimination
+
+--------------------------------------------------------------------------------
+CLASS: GPUMemoryPool
+--------------------------------------------------------------------------------
+WHAT: Pool of reusable GPU memory buffers
+WHY: cudaMalloc/cudaFree are expensive - reuse buffers instead
+CONNECTS TO: Global instance used by all CUDA kernels
+
+HOW IT WORKS:
+  - Allocate buffers on first use
+  - Keep track of buffers by size
+  - Reuse existing buffers when requested
+  - Free all buffers on destruction
+
+PRIVATE FIELDS:
+  - buffers_: Map from size → list of available buffers
+  - in_use_: Set of currently used buffers
+  - total_allocated_: Total GPU memory allocated
+
+PUBLIC METHODS:
+
+get_buffer(size) → void*
+  WHAT: Get GPU buffer of at least 'size' bytes
+  WHY: Avoid repeated cudaMalloc calls
+  CONNECTS TO: Called by kernel launch code
+  
+  ALGORITHM:
+    1. Look for existing buffer of this size in buffers_[size]
+    2. If found:
+       a. Remove from buffers_ list
+       b. Add to in_use_ set
+       c. Return pointer
+    3. If not found:
+       a. Call cudaMalloc to allocate new buffer
+       b. Add to in_use_ set
+       c. Increment total_allocated_
+       d. Return pointer
+  
+  RETURNS: Pointer to GPU memory
+
+return_buffer(ptr, size)
+  WHAT: Return buffer to pool for reuse
+  WHY: Make buffer available for next get_buffer() call
+  CONNECTS TO: Called after kernel completes
+  
+  ALGORITHM:
+    1. Remove ptr from in_use_ set
+    2. Add ptr to buffers_[size] list
+
+clear()
+  WHAT: Free all buffers in pool
+  WHY: Release GPU memory before exit
+  CONNECTS TO: Called by destructor
+
+get_total_allocated() → size_t
+  WHAT: Get total GPU memory allocated
+  WHY: Monitor memory usage
+  CONNECTS TO: Can be logged for diagnostics
+
+GLOBAL INSTANCE:
+
+extern GPUMemoryPool g_gpu_memory_pool;
+  WHAT: Global memory pool instance
+  WHY: Single pool shared across entire application
+  CONNECTS TO: All CUDA code uses this instance
+
+FILE: cuda/gpu_memory_pool.cu
+PURPOSE: Implementation of GPUMemoryPool
+
+IMPLEMENTATION NOTES:
+  - Thread-safe if accessed from single host thread
+  - Buffers rounded up to alignment boundaries
+  - Destructor calls clear() automatically
+
+================================================================================
+FILE: include/cuda/gaussian_elimination.cuh
+PURPOSE: GPU-accelerated Gaussian elimination for XOR constraints
+CONNECTS TO: Used by ApproximateCounter to solve XOR systems
+
+--------------------------------------------------------------------------------
+FUNCTION: cuda::gaussian_elimination_gpu(matrix, rows, cols) → bool
+--------------------------------------------------------------------------------
+WHAT: Solve XOR constraint system using GPU-parallel Gaussian elimination
+WHY: Many XOR constraints (100+) benefit from parallel processing
+CONNECTS TO: Called by ApproximateCounter::apply_xor_constraints()
+
+PARAMETERS:
+  - matrix: Augmented matrix [A|b] representing XOR system
+            Each row is one XOR constraint
+            Last column is RHS (0 or 1)
+  - rows: Number of XOR constraints
+  - cols: Number of variables + 1 (for RHS)
+
+GAUSSIAN ELIMINATION ALGORITHM:
+  Goal: Reduce matrix to row echelon form
+  
+  Row echelon form:
+    [1 0 0 | b1]     x1 = b1
+    [0 1 0 | b2]  →  x2 = b2
+    [0 0 1 | b3]     x3 = b3
+  
+  Algorithm:
+    For each column c:
+      1. Find pivot row (row with 1 in column c)
+      2. Swap pivot row to current position
+      3. Eliminate column c in all other rows (XOR pivot row)
+  
+  GPU PARALLELIZATION:
+    - Step 3 (elimination) parallelized: each row processed by one thread
+    - Multiple rows XORed with pivot row simultaneously
+    - Significant speedup for large systems (100+ rows)
+
+ALGORITHM STEPS:
+  1. Copy matrix to GPU
+  2. For each pivot column:
+     a. Find pivot on GPU (parallel scan)
+     b. Swap rows on GPU
+     c. Launch elimination kernel (one thread per row)
+     d. Synchronize
+  3. Copy reduced matrix back to host
+  4. Extract assignments from row echelon form
+
+RETURNS: true if system solvable, false if inconsistent
+
+FILE: cuda/gaussian_elimination.cu
+PURPOSE: Implementation of GPU Gaussian elimination
+
+KEY KERNELS:
+
+find_pivot_kernel<<<...>>>
+  WHAT: Find row with 1 in current pivot column
+  WHY: Need pivot for elimination step
+  PARALLELIZATION: One thread per row, parallel search
+
+eliminate_kernel<<<...>>>
+  WHAT: Eliminate pivot column in all rows
+  WHY: Core of Gaussian elimination
+  PARALLELIZATION: One thread per row
+  ALGORITHM:
+    For each row r:
+      If row r has 1 in pivot column:
+        XOR entire row r with pivot row
+
+GPU OPTIMIZATION:
+  - Uses shared memory for pivot row (fast access)
+  - Coalesced memory access for matrix
+  - Uses memory pool for buffers (avoid malloc overhead)
+
+================================================================================
+FILE: include/cuda/clause_evaluation.cuh
+PURPOSE: GPU-accelerated clause evaluation and unit propagation
+CONNECTS TO: Used by SATSolver during DPLL when GPU enabled
+
+--------------------------------------------------------------------------------
+FUNCTION: cuda::evaluate_clauses_gpu(flat_literals, offsets, assignment) → bool
+--------------------------------------------------------------------------------
+WHAT: Check if all clauses satisfied by assignment (GPU parallel)
+WHY: Large formulas have many clauses - check all in parallel
+CONNECTS TO: Called by SATSolver::dpll() when use_gpu_=true
+
+PARAMETERS:
+  - flat_literals: All clause literals in one flat array
+                   Example: clause1=[1,-2], clause2=[3] → [1,-2,3]
+  - offsets: Starting index of each clause in flat_literals
+             Example: [0, 2, 3] (clause1 starts at 0, clause2 at 2, end at 3)
+  - assignment: Variable assignments to check
+
+CLAUSE EVALUATION:
+  Clause is satisfied if ANY literal is true
+  Literal is true if:
+    - Positive literal (x) and variable assigned true
+    - Negative literal (¬x) and variable assigned false
+
+GPU PARALLELIZATION:
+  - One thread per clause
+  - Each thread checks its clause independently
+  - All clauses checked simultaneously
+  - Massive speedup for formulas with 1000+ clauses
+
+ALGORITHM:
+  1. Copy data to GPU
+  2. Launch kernel: one thread per clause
+  3. Each thread:
+     a. Get clause bounds from offsets
+     b. Iterate clause literals
+     c. Check if any literal satisfied
+     d. Write result (true/false) to output array
+  4. Copy results back to CPU
+  5. Return true if all clauses satisfied
+
+RETURNS: true if all clauses satisfied, false otherwise
+
+--------------------------------------------------------------------------------
+FUNCTION: cuda::unit_propagation_gpu(flat_literals, offsets, assignment, conflict) → bool
+--------------------------------------------------------------------------------
+WHAT: Find all unit clauses using GPU, propagate implications
+WHY: Unit propagation is repetitive - parallelize across clauses
+CONNECTS TO: Called by SATSolver::dpll() in GPU code path
+
+PARAMETERS:
+  - flat_literals: Flattened clause literals
+  - offsets: Clause boundaries
+  - assignment: Current partial assignment (input/output)
+  - conflict: Output parameter - set to true if conflict detected
+
+UNIT CLAUSE:
+  Clause with only one unassigned literal (other literals false or unassigned but clause not satisfied)
+  That literal MUST be true for formula to be SAT
+
+GPU PARALLELIZATION:
+  - Phase 1: Find all unit clauses in parallel (one thread per clause)
+  - Phase 2: Apply unit assignments (may create new unit clauses)
+  - Iterate until fixpoint
+
+ALGORITHM:
+  1. Copy data to GPU
+  2. While changes occur:
+     a. Launch find_unit_clauses_kernel
+        - Each thread checks one clause
+        - If clause is unit: mark the forced literal
+     b. Synchronize
+     c. Copy unit literals back to CPU
+     d. Update assignment map
+     e. Copy assignment back to GPU
+  3. Check for conflicts (empty clauses)
+  4. Return result
+
+CONFLICT DETECTION:
+  If clause has all literals false: empty clause → UNSAT
+  This is detected during unit finding
+
+RETURNS: true if no conflict, false if UNSAT detected
+
+--------------------------------------------------------------------------------
+FUNCTION: cuda::convert_clauses_to_gpu_format(clauses, flat_literals, offsets)
+--------------------------------------------------------------------------------
+WHAT: Convert vector<vector<Literal>> to flat format for GPU
+WHY: GPU works better with flat arrays than nested structures
+CONNECTS TO: Called by SATSolver before GPU operations
+
+ALGORITHM:
+  1. Count total literals
+  2. Allocate flat_literals array
+  3. Allocate offsets array (num_clauses + 1)
+  4. For each clause:
+     a. Store offset (current position in flat_literals)
+     b. Copy clause literals to flat_literals
+     c. Advance position
+  5. Store final offset (total length)
+
+EXAMPLE:
+  Input: [[1,-2], [3], [4,-5,6]]
+  Output:
+    flat_literals = [1,-2,3,4,-5,6]
+    offsets = [0, 2, 3, 6]
+  
+  Clause 0: literals[0:2] = [1,-2]
+  Clause 1: literals[2:3] = [3]
+  Clause 2: literals[3:6] = [4,-5,6]
+
+FILE: cuda/clause_evaluation.cu
+PURPOSE: Implementation of GPU clause evaluation
+
+KEY KERNELS:
+
+check_all_clauses_kernel<<<...>>>
+  WHAT: Check if each clause satisfied (one thread per clause)
+  WHY: Parallel clause checking
+  ALGORITHM:
+    threadId = blockIdx * blockDim + threadIdx
+    clause_start = offsets[threadId]
+    clause_end = offsets[threadId + 1]
+    satisfied = false
+    for i in clause_start to clause_end:
+      literal = flat_literals[i]
+      if literal satisfied by assignment:
+        satisfied = true
+        break
+    output[threadId] = satisfied
+
+find_unit_clauses_kernel<<<...>>>
+  WHAT: Find unit clauses (one thread per clause)
+  WHY: Parallel unit detection
+  ALGORITHM:
+    threadId = blockIdx * blockDim + threadIdx
+    clause_start = offsets[threadId]
+    clause_end = offsets[threadId + 1]
+    
+    unassigned_literal = 0
+    unassigned_count = 0
+    all_false = true
+    
+    for i in clause_start to clause_end:
+      literal = flat_literals[i]
+      variable = abs(literal)
+      
+      if variable not in assignment:
+        unassigned_count++
+        unassigned_literal = literal
+        all_false = false
+      else if literal satisfied:
+        all_false = false
+        break  # clause satisfied, not unit
+      
+    if all_false:
+      output[threadId] = CONFLICT
+    else if unassigned_count == 1:
+      output[threadId] = unassigned_literal  # unit clause!
+    else:
+      output[threadId] = 0  # not unit
+
+GPU OPTIMIZATION:
+  - Uses memory pool for all buffers
+  - Block size tuned for occupancy (256 threads/block)
+  - Coalesced memory access patterns
+  - Shared memory for assignment map (faster lookups)
+
+================================================================================
+                        UTILITIES
+================================================================================
+
+FILE: include/utils/logger.h
+PURPOSE: Logging system for status messages and debugging
+CONNECTS TO: Used throughout entire codebase
+
+--------------------------------------------------------------------------------
+ENUM: LogLevel
+--------------------------------------------------------------------------------
+VALUES:
+  - DEBUG: Detailed debugging information (disabled by default)
+  - INFO: Normal status messages
+  - WARNING: Warning messages
+  - ERROR: Error messages
+
+--------------------------------------------------------------------------------
+CLASS: Logger (Singleton)
+--------------------------------------------------------------------------------
+WHAT: Global logging system
+WHY: Centralized logging with consistent formatting
+CONNECTS TO: All components use Logger for output
+
+METHODS:
+
+static instance() → Logger&
+  WHAT: Get singleton instance
+  WHY: Single global logger
+  CONNECTS TO: All logging goes through this instance
+
+set_level(level)
+  WHAT: Set minimum log level
+  WHY: Control verbosity
+  CONNECTS TO: main() sets to DEBUG if --verbose
+
+log(level, message)
+  WHAT: Log message at specified level
+  WHY: Flexible logging
+  CONNECTS TO: Internal implementation of LOG_* macros
+
+MACROS (for convenience):
+
+LOG_DEBUG(...): Log debug message
+LOG_INFO(...): Log info message  
+LOG_WARNING(...): Log warning
+LOG_ERROR(...): Log error
+
+USAGE:
+  LOG_INFO("Starting computation with ", n, " variables");
+  LOG_DEBUG("Iteration ", i, " complete");
+
+OUTPUT FORMAT:
+  [HH:MM:SS.mmm] LEVEL: message
+
+FILE: src/utils/logger.cpp
+PURPOSE: Logger implementation
+
+IMPLEMENTATION:
+  - Uses std::chrono for timestamps
+  - Thread-safe (mutex protected)
+  - Outputs to std::cout (info/debug) or std::cerr (warning/error)
+
+================================================================================
+FILE: include/utils/timer.h
+PURPOSE: Performance timing utilities
+CONNECTS TO: Used to measure execution time
+
+--------------------------------------------------------------------------------
+CLASS: Timer
+--------------------------------------------------------------------------------
+WHAT: Simple stopwatch timer
+WHY: Measure elapsed time
+CONNECTS TO: Can be used standalone for timing
+
+METHODS:
+
+start()
+  WHAT: Start/restart timer
+  WHY: Begin timing interval
+  CONNECTS TO: Called at start of operation
+
+stop() → double
+  WHAT: Stop timer and return elapsed seconds
+  WHY: Get timing result
+  CONNECTS TO: Called at end of operation
+  RETURNS: Elapsed time in seconds
+
+elapsed() → double
+  WHAT: Get elapsed time without stopping
+  WHY: Check progress
+  RETURNS: Seconds since start()
+
+--------------------------------------------------------------------------------
+CLASS: ScopedTimer
+--------------------------------------------------------------------------------
+WHAT: RAII timer that auto-registers with TimerRegistry
+WHY: Convenient timing with automatic registration
+CONNECTS TO: ApproximateCounter uses this
+
+USAGE:
+  {
+    ScopedTimer timer("my_operation");
+    // ... operation ...
+  }  // Timer stops here, registers elapsed time
+
+CONSTRUCTOR:
+  ScopedTimer(name)
+    - Starts timing
+    - Stores name for registration
+
+DESTRUCTOR:
+  ~ScopedTimer()
+    - Stops timing
+    - Registers elapsed time with TimerRegistry
+
+--------------------------------------------------------------------------------
+CLASS: TimerRegistry (Singleton)
+--------------------------------------------------------------------------------
+WHAT: Global registry of named timers
+WHY: Collect timing statistics from entire execution
+CONNECTS TO: ScopedTimer auto-registers, ApproximateCounter queries results
+
+METHODS:
+
+static instance() → TimerRegistry&
+  WHAT: Get singleton instance
+  WHY: Global registry
+  CONNECTS TO: All timers register here
+
+register_time(name, seconds)
+  WHAT: Record timing result
+  WHY: Accumulate statistics
+  CONNECTS TO: Called by ScopedTimer destructor
+
+get_elapsed(name) → double
+  WHAT: Retrieve elapsed time for named timer
+  WHY: Get timing results
+  CONNECTS TO: ApproximateCounter queries "total_counting" timer
+  RETURNS: Elapsed seconds, or 0.0 if name not found
+
+get_all_timings() → map<string, double>
+  WHAT: Get all timing results
+  WHY: Generate complete performance report
+  CONNECTS TO: Could be used for detailed profiling
+
+FILE: src/utils/timer.cpp
+PURPOSE: Timer implementation
+
+IMPLEMENTATION:
+  - Uses std::chrono::high_resolution_clock
+  - Stores timings in unordered_map
+  - Thread-safe (mutex protected)
+
+================================================================================
+                      EXECUTION FLOW SUMMARY
+================================================================================
+
+When you run: ./bin/sharp_sat formula.cnf
+
+COMPLETE FLOW:
+
+1. main() starts (src/main.cpp)
+   ↓
+2. Check CUDA availability (cuda_interface.h)
+   ↓
+3. Parse CNF file (CNFParser::parse_file)
+   ↓
+4. Create ApproximateCounter with config
+   ↓
+5. ApproximateCounter::count(cnf)
+   ↓
+6. ApproximateCounter::approxmc(cnf)
+   ↓
+   ├─→ 7. find_pivot_threshold(cnf)
+   │      ↓
+   │      └─→ Binary search:
+   │          ├─→ generate XOR constraints (XorHashGenerator or MLHashInterface)
+   │          ├─→ check_sat_with_xors()
+   │          │   ├─→ apply_xor_constraints() [Gaussian elimination on GPU]
+   │          │   └─→ SATSolver::solve()
+   │          │       ├─→ CNFSimplifier::simplify()
+   │          │       └─→ SATSolver::dpll()
+   │          │           ├─→ unit_propagation (GPU or CPU)
+   │          │           │   └─→ cuda::unit_propagation_gpu() [if GPU enabled]
+   │          │           ├─→ choose_variable() [MOMS heuristic]
+   │          │           └─→ recursive branching
+   │          └─→ compute SAT probability, adjust threshold
+   │
+   └─→ 8. Run iterations at pivot threshold
+       ├─→ For each iteration:
+       │   ├─→ generate XOR constraints
+       │   └─→ check_sat_with_xors() [same as above]
+       ├─→ Count successful SAT checks
+       └─→ Estimate count from SAT probability
+   ↓
+9. compute_bounds() [statistical confidence bounds]
+   ↓
+10. Return CountResult to main()
+   ↓
+11. Display results to user
+
+KEY INVARIANTS:
+
+- CNF immutable after parsing (cloned before modification)
+- XOR constraints generated fresh for each SAT check
+- GPU used if available, graceful fallback to CPU
+- Statistics logged at each major step
+- Timing tracked by ScopedTimer
+
+PARALLELIZATION POINTS:
+
+1. Gaussian elimination (all XOR constraints processed in parallel on GPU)
+2. Clause evaluation (all clauses checked in parallel on GPU)
+3. Unit propagation (all clauses searched for units in parallel on GPU)
+
+GPU DECISION FLOW:
+
+Is CUDA available?
+  ├─→ YES: Create SATSolver with use_gpu=true
+  │        → During DPLL:
+  │          - unit_propagation_gpu() for unit propagation
+  │          - gaussian_elimination_gpu() for XOR solving
+  │
+  └─→ NO:  Create SATSolver with use_gpu=false
+           → During DPLL:
+             - CNFSimplifier::unit_propagate() (CPU)
+             - Gaussian elimination on CPU
+
+================================================================================
+                      FILE DEPENDENCIES
+================================================================================
+
+Dependency graph (A → B means A depends on B):
+
+main.cpp
+  → cnf/cnf_parser.h → cnf/cnf_structure.h
+  → solver/approximate_counter.h
+      → cnf/cnf_structure.h
+      → xor/xor_hash_generator.h
+      → xor/ml_hash_interface.h
+      → solver/sat_solver.h
+          → cnf/cnf_structure.h
+          → solver/cnf_simplifier.h
+          → cuda/clause_evaluation.cuh
+      → cuda/gaussian_elimination.cuh
+  → cuda_interface.h
+  → utils/logger.h
+  → utils/timer.h
+
+All CUDA files:
+  → cuda/gpu_utils.cuh
+  → cuda/gpu_memory_pool.cuh
+
+================================================================================
+                      PERFORMANCE CHARACTERISTICS
+================================================================================
+
+TIME COMPLEXITY:
+
+CNF Parsing: O(clauses × avg_clause_size)
+CNF Simplification: O(clauses × variables) worst case
+DPLL SAT Solving: O(2^variables) worst case, much better in practice
+Gaussian Elimination: O(constraints × variables^2) CPU, O(constraints × variables) GPU
+XOR Generation: O(num_hashes × variables)
+ApproxMC: O(iterations × [XOR_generation + Gaussian_elimination + SAT_solving])
+
+SPACE COMPLEXITY:
+
+CNF Storage: O(total_literals)
+Assignment Map: O(variables)
+XOR Constraints: O(num_hashes × variables) sparse
+GPU Memory: O(total_literals + variables + num_hashes × variables)
+
+BOTTLENECKS:
+
+1. SAT solving (dominates for hard formulas)
+2. Pivot threshold finding (multiple SAT checks)
+3. GPU transfer overhead (for small formulas)
+
+OPTIMIZATIONS:
+
+1. GPU acceleration (clause evaluation, Gaussian elimination, unit propagation)
+2. Memory pooling (avoid allocation overhead)
+3. Sparse XOR constraints (faster Gaussian elimination)
+4. Early termination (decision limits in SAT solver)
+5. Unit propagation (reduces search space dramatically)
+6. MOMS heuristic (better branching decisions)
+
+================================================================================
+                      TESTING
+================================================================================
+
+TEST SUITE STRUCTURE:
+
+tests/test_cnf_structure.cpp - CNF data structure tests
+tests/test_cnf_parser.cpp - Parser tests
+tests/test_cnf_simplifier.cpp - Simplification tests
+tests/test_sat_solver.cpp - SAT solver tests
+tests/test_xor_hash.cpp - XOR generation tests
+tests/test_utils.cpp - Utility tests
+tests/test_approximate_counter.cpp - End-to-end counting tests
+tests/test_runner.cpp - Test harness
+
+COVERAGE:
+- 57 tests total
+- All major components tested
+- Integration tests for end-to-end flow
+
+================================================================================
+                      CONCLUSION
+================================================================================
+
+This codebase implements a complete approximate model counter using:
+- ApproxMC algorithm with XOR-based universal hashing
+- DPLL SAT solver with GPU acceleration
+- Gaussian elimination on GPU for XOR constraint solving
+- ML-enhanced hash generation (optional)
+- Robust error handling and logging
+- Comprehensive test coverage
+
+The system automatically adapts to available hardware (GPU vs CPU) and
+provides approximate counts with statistical guarantees (epsilon-delta).
+
+When you run ./bin/sharp_sat formula.cnf, you get:
+- Fast approximate count (much faster than exact counting)
+- Confidence bounds on the estimate
+- Automatic GPU acceleration if available
+- Progress logging throughout execution
+
+The implementation is production-quality with careful attention to:
+- Correctness (tested extensively)
+- Performance (GPU parallelization where beneficial)
+- Usability (automatic configuration, clear output)
+- Maintainability (well-structured, documented code)
+
+================================================================================
+                    END OF REFERENCE
+================================================================================

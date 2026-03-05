@@ -13,6 +13,7 @@ class SATSolver {
 public:
     SATSolver();
     explicit SATSolver(uint32_t max_decisions);
+    explicit SATSolver(uint32_t max_decisions, bool use_gpu);
     
     // Check satisfiability
     bool solve(const CNF& cnf);
@@ -25,15 +26,12 @@ public:
         return assignment_; 
     }
     
-    // Set timeout for finding a solution (this will increase as the CNF gets larger)
-    void set_timeout(double timeout) { timeout_seconds_ = timeout; }
-    
     // Set maximum number of decisions - if this is exceeded, the solver will give up and return false
     void set_max_decisions(uint32_t max_decisions) { max_decisions_ = max_decisions; }
     
-    // Statistics
-    uint64_t get_num_decisions() const { return num_decisions_; }
-    uint64_t get_num_conflicts() const { return num_conflicts_; }
+    // Enable/disable GPU acceleration
+    void set_use_gpu(bool use_gpu) { use_gpu_ = use_gpu; }
+    bool get_use_gpu() const { return use_gpu_; }
     
     void reset_stats() {
         num_decisions_ = 0;
@@ -47,18 +45,13 @@ private:
     // Choose next variable to branch on (0 if none available)
     Variable choose_variable(const CNF& cnf, const std::unordered_map<Variable, bool>& assignment);
     
-    // Check if all variables are assigned
-    bool all_assigned(const CNF& cnf, const std::unordered_map<Variable, bool>& assignment);
-    
-    // Check if formula is satisfied
-    bool is_satisfied(const CNF& cnf, const std::unordered_map<Variable, bool>& assignment);
-    
     CNFSimplifier simplifier_;
     std::unordered_map<Variable, bool> assignment_;
     uint32_t max_decisions_;
     double timeout_seconds_;
     uint64_t num_decisions_;
     uint64_t num_conflicts_;
+    bool use_gpu_;
 };
 
 } // namespace sharpsat

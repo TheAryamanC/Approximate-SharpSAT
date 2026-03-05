@@ -1,5 +1,7 @@
 #include "solver/sat_solver.h"
 #include "utils/logger.h"
+#include "cuda_interface.h"
+#include "cuda/clause_evaluation.cuh"
 #include <algorithm>
 
 using namespace std;
@@ -8,12 +10,17 @@ namespace sharpsat {
 // Constructors
 SATSolver::SATSolver() 
     : max_decisions_(1000000), timeout_seconds_(300.0), 
-      num_decisions_(0), num_conflicts_(0) {
+      num_decisions_(0), num_conflicts_(0), use_gpu_(false) {
 }
 
 SATSolver::SATSolver(uint32_t max_decisions) 
     : max_decisions_(max_decisions), timeout_seconds_(300.0),
-      num_decisions_(0), num_conflicts_(0) {
+      num_decisions_(0), num_conflicts_(0), use_gpu_(false) {
+}
+
+SATSolver::SATSolver(uint32_t max_decisions, bool use_gpu) 
+    : max_decisions_(max_decisions), timeout_seconds_(300.0),
+      num_decisions_(0), num_conflicts_(0), use_gpu_(use_gpu) {
 }
 
 // Solve without partial assignment
@@ -56,10 +63,32 @@ bool SATSolver::dpll(CNF& cnf, unordered_map<Variable, bool>& assignment) {
         return false;
     }
     
-    // propagate
-    if (!simplifier_.unit_propagate(cnf, assignment)) {
-        num_conflicts_++;
-        return false;
+    // propagate - use GPU if enabled and available
+    if (use_gpu_ && sharpsat::cuda::is_cuda_available()) {
+        // Convert CNF to GPU format
+        vector<vector<int32_t>> clause_vecs;
+        for (const auto& clause : cnf.clauses()) {
+            clause_vecs.push_back(clause.literals);
+        }
+        
+        vector<int32_t> flat_lits;
+        vector<uint32_t> offsets;
+        sharpsat::cuda::convert_clauses_to_gpu_format(clause_vecs, flat_lits, offsets);
+        
+        bool conflict = false;
+        if (!sharpsat::cuda::unit_propagation_gpu(flat_lits, offsets, assignment, &conflict)) {
+            num_conflicts_++;
+            return false;
+        }
+        
+        // Apply assignment to CNF
+        cnf.apply_assignment(assignment);
+    } else {
+        // CPU-based unit propagation
+        if (!simplifier_.unit_propagate(cnf, assignment)) {
+            num_conflicts_++;
+            return false;
+        }
     }
     
     // check if SAT/UNSAT after propagation
@@ -161,30 +190,6 @@ Variable SATSolver::choose_variable(const CNF& cnf, const unordered_map<Variable
     }
     
     return best_var;
-}
-
-// Check if all variables are assigned
-bool SATSolver::all_assigned(const CNF& cnf, const unordered_map<Variable, bool>& assignment) {
-    return assignment.size() >= cnf.num_variables();
-}
-
-// Check if formula is satisfied - all clauses must be satisfied by the current assignment
-bool SATSolver::is_satisfied(const CNF& cnf, const unordered_map<Variable, bool>& assignment) {
-    for (const auto& clause : cnf.clauses()) {
-        bool clause_sat = false;
-        for (Literal lit : clause.literals) {
-            Variable v = var(lit);
-            auto it = assignment.find(v);
-            if (it != assignment.end() && it->second == sign(lit)) {
-                clause_sat = true;
-                break;
-            }
-        }
-        if (!clause_sat) {
-            return false;
-        }
-    }
-    return true;
 }
 
 } // namespace sharpsat

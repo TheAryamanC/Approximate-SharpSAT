@@ -43,6 +43,14 @@ bool parse_args(int argc, char** argv, AppConfig& config) {
         return false;
     }
     
+    // Check for help flag first
+    for (int i = 1; i < argc; i++) {
+        string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            return false;
+        }
+    }
+    
     config.input_file = argv[1];
     
     for (int i = 2; i < argc; i++) {

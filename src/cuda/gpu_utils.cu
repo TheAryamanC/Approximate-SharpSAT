@@ -3,7 +3,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 
-#include "gpu_utils.cuh"
+#include "cuda/gpu_utils.cuh"
 #include <iostream>
 #include <sstream>
 
