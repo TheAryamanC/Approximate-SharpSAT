@@ -1,628 +1,314 @@
-// Source file for approximate model counting
-
 #include "solver/approximate_counter.h"
-#include "solver/partial_assignment.h"
-#include "solver/cnf_simplifier.h"
-#include <iostream>
-#include <algorithm>
-#include <numeric>
+#include "utils/logger.h"
+#include "utils/timer.h"
+#include "cuda_interface.h"
 #include <cmath>
+#include <algorithm>
 
 using namespace std;
+namespace sharpsat {
 
-// run multiple trials of approximate counting and aggregate results
-ApproximationResult ApproximateCounter::approximateCount(const CNFFormula& formula, int numTrials, int numXORs, double density) {
-    vector<TrialResult> trials;
-    trials.reserve(numTrials);
+// Constructor
+ApproximateCounter::ApproximateCounter(const CounterConfig& config)
+    : config_(config) {
     
-    for (int i = 0; i < numTrials; i++) {
-        TrialResult trial = singleTrial(formula, density, 50);
-        trials.push_back(trial);
-    }
-    
-    return aggregateResults(trials);
+    hash_generator_ = make_unique<XorHashGenerator>(config.seed);
+    // Initialize ML interface with model path
+    ml_interface_ = make_unique<MLHashInterface>("ml_model/model.pkl");
+    sat_solver_ = make_unique<SATSolver>(10000);  // max 10k decisions for faster benchmarks
 }
 
-// run a single trial with adaptive XOR count
-TrialResult ApproximateCounter::singleTrial(const CNFFormula& formula, double density, int threshold) {
-    TrialResult result;
-    int numVariables = formula.getNumVariables();
-    int numXORs = 0;
+// Main counting interface
+CountResult ApproximateCounter::count(const CNF& cnf) {
+    // start timer + log information
+    ScopedTimer timer("total_counting");
     
-    // add XORs until solution space is small enough
-    while (numXORs < numVariables) {
-        auto xors = XORHashGenerator::generateXORFamily(numVariables, numXORs, density);
-        auto xorSolution = PartialAssignment::solveXORSystem(xors, numVariables);
-        
-        if (!xorSolution.satisfiable) {
-            // too many XORs
-            if (numXORs == 0) {
-                result.satisfiable = false;
-                result.solutionCount = 0;
-                result.numXORs = 0;
-                return result;
-            }
-            numXORs--;
-            break;
-        }
-        
-        auto simplified = CNFSimplifier::applyXORSolution(formula, xorSolution);
-        
-        if (simplified.isUnsatisfiable) {
-            if (numXORs == 0) {
-                result.satisfiable = false;
-                result.solutionCount = 0;
-                result.numXORs = 0;
-                return result;
-            }
-            numXORs--;
-            break;
-        }
-        
-        uint64_t cellCount = countSolutions(simplified.simplified, threshold + 10);
-        
-        if (cellCount == 0) {
-            if (numXORs == 0) {
-                result.satisfiable = false;
-                result.solutionCount = 0;
-                result.numXORs = 0;
-                return result;
-            }
-            numXORs--;
-            break;
-        }
-        
-        if (cellCount > 0 && cellCount <= threshold) {
-            result.satisfiable = true;
-            result.numXORs = numXORs;
-            result.freeVariables = xorSolution.freeVariables.size();
-            result.assignedVariables = xorSolution.assignment.size();
-            
-            // scale up get estimate based on number of XORs added
-            uint64_t scaleFactor = (numXORs < 64) ? (1ULL << numXORs) : UINT64_MAX;
-            if (cellCount > UINT64_MAX / scaleFactor) {
-                result.solutionCount = UINT64_MAX;
-            } else {
-                result.solutionCount = cellCount * scaleFactor;
-            }
-            return result;
-        }
-        
-        // cell count is still too high, add more XORs
-        numXORs++;
-    }
+    LOG_INFO("Starting approximate model counting");
+    LOG_INFO("Formula: ", cnf.num_variables(), " variables, ", cnf.num_clauses(), " clauses");
+    LOG_INFO("Config: epsilon=", config_.epsilon, ", delta=", config_.delta);
     
-    // if we exit loop without returning, we have found a good number of XORs to get a small cell count, so do final count and return result
-    auto xors = XORHashGenerator::generateXORFamily(numVariables, numXORs, density);
-    auto xorSolution = PartialAssignment::solveXORSystem(xors, numVariables);
-    auto simplified = CNFSimplifier::applyXORSolution(formula, xorSolution);
+    // run core counting algorithm
+    CountResult result = approxmc(cnf);
     
-    result.numXORs = numXORs;
-    result.freeVariables = xorSolution.freeVariables.size();
-    result.assignedVariables = xorSolution.assignment.size();
-    
-    uint64_t cellCount = countSolutions(simplified.simplified, threshold + 10);
-    uint64_t scaleFactor = (numXORs < 64) ? (1ULL << numXORs) : UINT64_MAX;
-    
-    result.satisfiable = (cellCount > 0);
-    if (cellCount > UINT64_MAX / scaleFactor) {
-        result.solutionCount = UINT64_MAX;
-    } else {
-        result.solutionCount = cellCount * scaleFactor;
-    }
+    // stop timer + log results
+    result.time_seconds = TimerRegistry::instance().get_elapsed("total_counting");
+    LOG_INFO("Model count (approximate): ", result.count);
+    LOG_INFO("Total time: ", result.time_seconds, " seconds");
     
     return result;
 }
 
-// aggregate results from multiple trials to get final approximation
-ApproximationResult ApproximateCounter::aggregateResults(const vector<TrialResult>& trials) {
-    ApproximationResult result;
-    result.totalTrials = trials.size();
+CountResult ApproximateCounter::approxmc(const CNF& cnf) {
+    CountResult result;
     
-    // get counts from successful trials
-    for (const auto& trial : trials) {
-        if (trial.satisfiable) {
-            result.successfulTrials++;
-            result.trialCounts.push_back(trial.solutionCount);
-        }
+    // trivial cases - empty formula + formula with empty clause
+    if (cnf.is_empty()) {
+        result.count = pow(2.0, cnf.num_variables());
+        result.lower_bound = result.count;
+        result.upper_bound = result.count;
+        result.successful = true;
+        return result;
     }
-    
-    if (result.successfulTrials == 0) {
-        // all unsatisfiable - return 0
-        result.estimatedCount = 0;
-        result.averageCount = 0.0;
+    if (cnf.has_empty_clause()) {
+        result.count = 0.0;
+        result.lower_bound = 0.0;
+        result.upper_bound = 0.0;
+        result.successful = true;
         return result;
     }
     
-    // median used - more robust to outliers than mean
-    vector<uint64_t> sortedCounts = result.trialCounts;
-    sort(sortedCounts.begin(), sortedCounts.end());
+    // find pivot threshold
+    LOG_INFO("Finding pivot threshold...");
+    uint32_t pivot = find_pivot_threshold(cnf);
+    LOG_INFO("Pivot threshold: ", pivot);
     
-    size_t medianIndex = sortedCounts.size() / 2;
-    if (sortedCounts.size() % 2 == 0) {
-        result.estimatedCount = (sortedCounts[medianIndex - 1] + sortedCounts[medianIndex]) / 2;
-    } else {
-        result.estimatedCount = sortedCounts[medianIndex];
+    // if pivot is 0, formula is UNSAT with high probability
+    if (pivot == 0) {
+        result.count = 0.0;
+        result.lower_bound = 0.0;
+        result.upper_bound = 0.0;
+        result.successful = true;
+        return result;
     }
     
-    // get average
-    uint64_t sum = accumulate(result.trialCounts.begin(), result.trialCounts.end(), 0ULL);
-    result.averageCount = static_cast<double>(sum) / result.trialCounts.size();
+    // run multiple iterations and get SAT count
+    // number of iterations based on confidence parameters
+    // formula:
+    uint32_t num_iterations = static_cast<uint32_t>(ceil(3.0 * log(3.0 / config_.delta) / (config_.epsilon * config_.epsilon)));
+    num_iterations = min(num_iterations, config_.max_iterations);
+    LOG_INFO("Running ", num_iterations, " iterations at pivot threshold");
+    
+    uint32_t sat_count = 0;
+    for (uint32_t iter = 0; iter < num_iterations; iter++) {
+        // generate XOR constraints
+        vector<XorConstraint> xors;
+        if (config_.use_ml_hashes) {
+            // ML interface now includes heuristic-based generation
+            xors = ml_interface_->generate_ml_hashes(cnf, pivot);
+        } else {
+            double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
+            xors = hash_generator_->generate_random_hashes(cnf.num_variables(), pivot, sparsity);
+        }
+        
+        // check satisfiability with XOR constraints
+        unordered_map<Variable, bool> assignment;
+        if (check_sat_with_xors(cnf, xors, assignment)) {
+            sat_count++;
+        }
+        
+        // log progress every 10 iterations
+        if ((iter + 1) % 10 == 0) {
+            LOG_DEBUG("Completed ", iter + 1, "/", num_iterations, " iterations, SAT count: ", sat_count);
+        }
+    }
+    
+    result.num_iterations = num_iterations;
+    
+    // estimate count based on SAT probability
+    double sat_prob = static_cast<double>(sat_count) / num_iterations;
+    
+    if (sat_prob > 0.0) {
+        // expected cell size is 2^(n - pivot)
+        double cell_size = pow(2.0, cnf.num_variables() - pivot);
+        
+        // estimated count
+        result.count = cell_size * config_.pivot_threshold;
+        
+        // compute bounds
+        compute_bounds(pivot, cnf.num_variables(), result);
+        result.successful = true;
+    } else {
+        // all iterations were UNSAT - count is very small
+        result.count = pow(2.0, cnf.num_variables() - pivot - 1);
+        result.lower_bound = 0.0;
+        result.upper_bound = result.count * 2.0;
+        result.successful = true;
+    }
     
     return result;
 }
 
-// count solutions in simplified CNF up to maxCount
-uint64_t ApproximateCounter::countSolutions(const CNFFormula& formula, int maxCount) {
-    if (formula.clauses.empty()) {
-        // empty formula is always true
-        if (formula.numVariables >= 64) return UINT64_MAX;
-        return 1ULL << formula.numVariables;
-    }
+// Binary search for pivot threshold
+uint32_t ApproximateCounter::find_pivot_threshold(const CNF& cnf) {
+    uint32_t left = 0;
+    uint32_t right = cnf.num_variables();
+    uint32_t pivot = 0;
     
-    uint64_t count = 0;
-    vector<int> assignment(formula.numVariables, -1);
+    double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
     
-    // make sure there is at least one solution
-    if (!solveSAT(formula, assignment, 0)) {
-        return 0;  // UNSAT
-    }
-    
-    count = 1;
-    
-    while (count < maxCount) {
-        if (!findNextSolution(formula, assignment)) {
+    // we want to find the largest pivot such that formula with pivot XOR constraints is SAT with high probability
+    while (left <= right && right <= cnf.num_variables()) {
+        uint32_t mid = (left + right) / 2;
+        
+        // run a few samples to estimate SAT probability at this pivot
+        uint32_t num_samples = 3;  // reduced from 10 for faster benchmarks
+        uint32_t sat_samples = 0;
+        
+        for (uint32_t i = 0; i < num_samples; i++) {
+            // generate XOR constraints
+            vector<XorConstraint> xors;
+            if (config_.use_ml_hashes) {
+                xors = ml_interface_->generate_ml_hashes(cnf, mid);
+            } else {
+                xors = hash_generator_->generate_random_hashes(cnf.num_variables(), mid, sparsity);
+            }
+            
+            // check SAT
+            unordered_map<Variable, bool> assignment;
+            if (check_sat_with_xors(cnf, xors, assignment)) {
+                sat_samples++;
+            }
+        }
+        
+        // estimate SAT probability
+        double sat_prob = static_cast<double>(sat_samples) / num_samples;
+        LOG_DEBUG("Threshold ", mid, ": SAT probability = ", sat_prob);
+        
+        // We want sat_prob close to pivot_threshold / num_samples (range)
+        if (sat_prob > 0.8) {
+            // too many SAT, increase threshold
+            pivot = mid;
+            left = mid + 1;
+        } else if (sat_prob < 0.3) {
+            // too few SAT, decrease threshold
+            if (mid == 0) break;
+            right = mid - 1;
+        } else {
+            pivot = mid;
             break;
         }
-        count++;
     }
     
-    return count;
+    return pivot;
 }
 
-// find next solution different from current assignment by adding blocking clause and solving again
-bool ApproximateCounter::findNextSolution(const CNFFormula& formula, vector<int>& assignment) {
-    // keep flipping variables until we find a new solution or exhaust all possibilities -> to be changed in the future
-    for (int i = formula.numVariables - 1; i >= 0; i--) {
-        int originalValue = assignment[i];
-        
-        // flip variable to block current solution
-        assignment[i] = 1 - originalValue;
-        vector<int> newAssignment = assignment;
-        if (solveSAT(formula, newAssignment, i + 1)) {
-            assignment = newAssignment;
-            return true;
-        }
-        
-        // restore original value and try next variable
-        assignment[i] = originalValue;
+// Check satisfiability with XOR constraints
+bool ApproximateCounter::check_sat_with_xors(const CNF& cnf, const vector<XorConstraint>& xors, unordered_map<Variable, bool>& assignment) {
+    // apply XOR constraints via Gaussian elimination
+    assignment = apply_xor_constraints(xors, cnf.num_variables());
+    
+    // apply assignment to CNF and check SAT
+    CNF simplified_cnf = cnf.clone();
+    simplified_cnf.apply_assignment(assignment);
+    
+    if (simplified_cnf.has_empty_clause()) {
+        return false;
     }
     
-    return false;
+    // use SAT solver on simplified formula
+    return sat_solver_->solve(simplified_cnf, assignment);
 }
 
-// cdcl sat solver
-bool ApproximateCounter::solveSAT(const CNFFormula& formula, vector<int>& assignment, int varIndex) {
-    // Ensure assignment vector is properly sized
-    if (assignment.size() < formula.numVariables) {
-        assignment.resize(formula.numVariables, -1);
+// Apply XOR constraints via Gaussian elimination
+unordered_map<Variable, bool> ApproximateCounter::apply_xor_constraints(const vector<XorConstraint>& xors, uint32_t num_variables) {
+    unordered_map<Variable, bool> assignment;
+    
+    if (xors.empty()) { // no constraints, return empty assignment
+        return assignment;
     }
     
-    vector<CDCLAssignment> cdclAssignment(formula.numVariables);
-    for (int i = 0; i < formula.numVariables; i++) {
-        cdclAssignment[i].value = assignment[i];
-        cdclAssignment[i].decisionLevel = (assignment[i] != -1) ? 0 : -1;
-        cdclAssignment[i].antecedent = -1;
-    }
-    
-    vector<Clause> learnedClauses;
-    WatchedLiterals watches;
-    watches.init(formula.numVariables, formula.clauses.size());
-    
-    VSIDSScores vsids;
-    vsids.init(formula.numVariables);
-    
-    initWatches(formula, learnedClauses, watches, formula.numVariables);
-    
-    int conflicts = 0;
-    int restartThreshold = 100;
-    
-    bool result = cdclSolve(formula, cdclAssignment, learnedClauses, watches, vsids, conflicts, restartThreshold);
-    
-    for (int i = 0; i < formula.numVariables; i++) {
-        assignment[i] = cdclAssignment[i].value;
-    }
-    
-    return result;
-}
-
-bool ApproximateCounter::cdclSolve(const CNFFormula& formula, vector<CDCLAssignment>& assignment, vector<Clause>& learnedClauses, WatchedLiterals& watches, VSIDSScores& vsids, int& conflicts, int& restartThreshold) {
-    int decisionLevel = 0;
-    vector<int> trail;        // stack of assigned variables in order of assignment
-    vector<int> trailLevels;  // index in trail where each decision level starts
-    trailLevels.push_back(0);
-    
-    while (true) {
-        // 1. Propagation
-        int conflictClause = -1;
-        if (!propagate(formula, learnedClauses, assignment, watches, decisionLevel, conflictClause)) {
-            // Conflict occurred
-            if (decisionLevel == 0) {
-                return false;  // UNSAT at root level
-            }
-            
-            // analyze conflict and learn clause
-            Clause learnedClause;
-            int backtrackLevel = 0;
-            analyzeConflict(formula, learnedClauses, assignment, conflictClause, learnedClause, backtrackLevel, vsids);
-            
-            // backtrack to appropriate level BEFORE adding learned clause
-            while (decisionLevel > backtrackLevel) {
-                int levelStart = trailLevels[decisionLevel];
-                for (int i = trail.size() - 1; i >= levelStart; i--) {
-                    assignment[trail[i]].value = -1;
-                    assignment[trail[i]].decisionLevel = -1;
-                    assignment[trail[i]].antecedent = -1;
-                }
-                trail.resize(levelStart);
-                trailLevels.pop_back();
-                decisionLevel--;
-            }
-            
-            // Now add and propagate the learned clause
-            learnedClauses.push_back(learnedClause);
-            int learnedIdx = formula.clauses.size() + learnedClauses.size() - 1;
-            
-            // Set up watches for learned clause
-            if (learnedClause.literals.size() >= 2) {
-                int lit0 = learnedClause.literals[0];
-                int lit1 = learnedClause.literals[1];
-                int idx0 = watches.litToIndex(lit0, formula.numVariables);
-                int idx1 = watches.litToIndex(lit1, formula.numVariables);
-                watches.watches[idx0].push_back(learnedIdx);
-                watches.watches[idx1].push_back(learnedIdx);
-            } else if (learnedClause.literals.size() == 1) {
-                // Unit clause - propagate immediately
-                Literal lit = learnedClause.literals[0];
-                int var = abs(lit) - 1;
-                if (var >= 0 && var < formula.numVariables && assignment[var].value == -1) {
-                    assignment[var].value = (lit > 0) ? 1 : 0;
-                    assignment[var].decisionLevel = decisionLevel;
-                    assignment[var].antecedent = learnedIdx;
-                    trail.push_back(var);
-                }
-            }
-            
-            conflicts++;
-            vsids.decayAll();
-            
-            // restart if too many conflicts
-            if (conflicts >= restartThreshold) {
-                for (int i = 0; i < formula.numVariables; i++) {
-                    if (assignment[i].decisionLevel > 0) {
-                        assignment[i].value = -1;
-                        assignment[i].decisionLevel = -1;
-                        assignment[i].antecedent = -1;
-                    }
-                }
-                trail.clear();
-                trailLevels.clear();
-                trailLevels.push_back(0);
-                decisionLevel = 0;
-                conflicts = 0;
-                restartThreshold = (int)(restartThreshold * 1.5);
-            }
-            
-            continue;
+    // if CUDA is enabled, use GPU for Gaussian elimination, otherwise use CPU
+    if (config_.use_cuda) {
+        vector<uint32_t> flat_vars, offsets;
+        vector<uint8_t> rhs;
+        sharpsat::cuda::convert_xors_to_gpu_format(xors, flat_vars, offsets, rhs);
+        
+        // GPU version - defined elsewhere
+        bool success = sharpsat::cuda::gaussian_elimination_gpu(flat_vars, offsets, rhs, num_variables, assignment);
+        
+        if (!success) {
+            LOG_DEBUG("Gaussian elimination detected conflict");
         }
-        
-        // 2. Check if all variables assigned
-        int unassignedVar = -1;
-        for (int i = 0; i < formula.numVariables; i++) {
-            if (assignment[i].value == -1) {
-                unassignedVar = i;
-                break;
-            }
-        }
-        
-        // all variables assigned and no conflict -> SAT
-        if (unassignedVar == -1) {
-            return true;
-        }
-        
-        // 3. Decision - pick unassigned variable with highest VSIDS score
-        int decisionVar = vsids.selectUnassigned(assignment);
-        if (decisionVar == -1) {
-            return true;
-        }
-        
-        int decisionValue = 1;
-        decisionLevel++;
-        trailLevels.push_back(trail.size());
-        
-        assignment[decisionVar].value = decisionValue;
-        assignment[decisionVar].decisionLevel = decisionLevel;
-        assignment[decisionVar].antecedent = -1;
-        trail.push_back(decisionVar);
-    }
-}
-
-// propagate to deduce new assignments
-bool ApproximateCounter::propagate(const CNFFormula& formula, const vector<Clause>& learnedClauses, vector<CDCLAssignment>& assignment, WatchedLiterals& watches, int currentLevel, int& conflictClause) {
-    vector<int> propagationQueue;
-    
-    // find all assigned variables at or below current level that haven't been propagated
-    // (assignments at current level definitely need propagation)
-    for (int i = 0; i < formula.numVariables; i++) {
-        if (assignment[i].value != -1 && assignment[i].decisionLevel == currentLevel) {
-            propagationQueue.push_back(i);
-        }
-    }
-    
-    // If queue is empty (e.g., after backtracking), check for unit clauses
-    if (propagationQueue.empty()) {
-        // Scan all clauses for unit clauses
-        auto checkForUnitClauses = [&](const vector<Clause>& clauses, int offset) {
-            for (size_t ci = 0; ci < clauses.size(); ci++) {
-                const Clause& clause = clauses[ci];
-                int unassignedLit = 0;
-                int unassignedCount = 0;
-                bool satisfied = false;
-                
-                for (Literal lit : clause.literals) {
-                    int var = abs(lit) - 1;
-                    if (var < 0 || var >= formula.numVariables) continue;
-                    
-                    if (assignment[var].value == -1) {
-                        unassignedLit = lit;
-                        unassignedCount++;
-                    } else {
-                        bool litVal = (lit > 0) ? (assignment[var].value == 1) : (assignment[var].value == 0);
-                        if (litVal) {
-                            satisfied = true;
-                            break;
-                        }
-                    }
-                }
-                
-                if (!satisfied && unassignedCount == 1 && unassignedLit != 0) {
-                    // Found unit clause - assign it
-                    int var = abs(unassignedLit) - 1;
-                    if (var >= 0 && var < formula.numVariables) {
-                        assignment[var].value = (unassignedLit > 0) ? 1 : 0;
-                        assignment[var].decisionLevel = currentLevel;
-                        assignment[var].antecedent = offset + ci;
-                        propagationQueue.push_back(var);
-                    }
-                } else if (!satisfied && unassignedCount == 0) {
-                    // Conflict
-                    conflictClause = offset + ci;
-                    return false;
-                }
-            }
-            return true;
-        };
-        
-        if (!checkForUnitClauses(formula.clauses, 0)) return false;
-        if (!checkForUnitClauses(learnedClauses, formula.clauses.size())) return false;
-    }
-    
-    size_t queuePos = 0;
-    while (queuePos < propagationQueue.size()) {
-        int var = propagationQueue[queuePos++];
-        
-        // Bounds check
-        if (var < 0 || var >= assignment.size() || var >= formula.numVariables) {
-            continue;
-        }
-        
-        int value = assignment[var].value;
-        
-        // get the literal that is now false due to this assignment
-        Literal falseLit = (value == 1) ? (-(var + 1)) : (var + 1);
-        int watchIdx = watches.litToIndex(falseLit, formula.numVariables);
-        
-        // check clauses with this literal
-        auto& watchList = watches.watches[watchIdx];
-        size_t i = 0;
-        while (i < watchList.size()) {
-            int clauseIdx = watchList[i];
-            
-            // update watch and check for conflict or propagation
-            if (!updateWatch(formula, learnedClauses, clauseIdx, falseLit, assignment, watches, currentLevel, conflictClause)) {
-                if (conflictClause != -1) {
-                    return false;  // Conflict
-                }
-                // add to queue to propagate
-                for (int j = 0; j < formula.numVariables; j++) {
-                    if (assignment[j].value != -1 && assignment[j].decisionLevel == currentLevel && 
-                        assignment[j].antecedent == clauseIdx) {
-                        bool alreadyInQueue = false;
-                        for (int k = queuePos; k < propagationQueue.size(); k++) {
-                            if (propagationQueue[k] == j) {
-                                alreadyInQueue = true;
-                                break;
-                            }
-                        }
-                        if (!alreadyInQueue) {
-                            propagationQueue.push_back(j);
-                        }
-                    }
-                }
-            }
-            
-            // check if watch was removed
-            if (i < watchList.size() && watchList[i] == clauseIdx) {
-                i++;
-            }
-        }
-    }
-    
-    return true;
-}
-
-bool ApproximateCounter::updateWatch(const CNFFormula& formula, const vector<Clause>& learnedClauses, int clauseIdx, Literal falseLit, vector<CDCLAssignment>& assignment, WatchedLiterals& watches, int currentLevel, int& conflictClause) {
-    // get clause
-    const Clause* clause = nullptr;
-    if (clauseIdx < formula.clauses.size()) {
-        clause = &formula.clauses[clauseIdx];
     } else {
-        clause = &learnedClauses[clauseIdx - formula.clauses.size()];
-    }
-    
-    // find the two watched literals
-    Literal watch1 = 0, watch2 = 0;
-    int watch1Pos = -1, watch2Pos = -1;
-    
-    for (size_t i = 0; i < clause->literals.size(); i++) {
-        Literal lit = clause->literals[i];
-        int var = abs(lit) - 1;
+        // CPU version - simple Gaussian elimination
+        vector<vector<bool>> matrix;
+        vector<bool> rhs_vec;
         
-        if (var >= formula.numVariables) continue;
-        
-        // check if this literal is watched
-        int litIdx = watches.litToIndex(lit, formula.numVariables);
-        bool isWatched = false;
-        for (int cidx : watches.watches[litIdx]) {
-            if (cidx == clauseIdx) {
-                isWatched = true;
-                break;
+        // build augmented matrix
+        for (const auto& xor_c : xors) {
+            vector<bool> row(num_variables, false);
+            for (Variable v : xor_c.variables) {
+                if (v > 0 && v <= num_variables) {
+                    row[v - 1] = true;
+                }
             }
+            matrix.push_back(row);
+            rhs_vec.push_back(xor_c.rhs);
         }
         
-        if (isWatched) {
-            if (watch1 == 0) {
-                watch1 = lit;
-                watch1Pos = i;
-            } else {
-                watch2 = lit;
-                watch2Pos = i;
-                break;
-            }
-        }
-    }
-    
-    if (watch1 != falseLit && watch2 != falseLit) {
-        return true;
-    }
-    
-    // find a new watch
-    for (size_t i = 0; i < clause->literals.size(); i++) {
-        if (i == watch1Pos || i == watch2Pos) continue;
+        // row reduce to echelon form
+        size_t num_rows = matrix.size();
+        size_t pivot_row = 0;
         
-        Literal lit = clause->literals[i];
-        int var = abs(lit) - 1;
-        if (var < 0 || var >= formula.numVariables || var >= assignment.size()) continue;
-        
-        // check if this literal is not false
-        bool isUnassigned = (assignment[var].value == -1);
-        bool isSatisfied = false;
-        if (!isUnassigned) {
-            isSatisfied = (lit > 0) ? (assignment[var].value == 1) : (assignment[var].value == 0);
-        }
-        
-        if (isUnassigned || isSatisfied) {
-            // found a new watch -> remove old watch and add new watch
-            int oldIdx = watches.litToIndex(falseLit, formula.numVariables);
-            auto& oldList = watches.watches[oldIdx];
-            for (auto it = oldList.begin(); it != oldList.end(); ++it) {
-                if (*it == clauseIdx) {
-                    oldList.erase(it);
+        for (size_t col = 0; col < num_variables && pivot_row < num_rows; col++) {
+            // find pivot
+            size_t pivot = pivot_row;
+            for (size_t r = pivot_row; r < num_rows; r++) {
+                if (matrix[r][col]) {
+                    pivot = r;
                     break;
                 }
             }
-            int newIdx = watches.litToIndex(lit, formula.numVariables);
-            watches.watches[newIdx].push_back(clauseIdx);
-            return true;
+            
+            if (!matrix[pivot][col]) {
+                continue;  // no pivot in this column, move to next column
+            }
+            
+            // swap pivot row to current row
+            if (pivot != pivot_row) {
+                swap(matrix[pivot], matrix[pivot_row]);
+                swap(rhs_vec[pivot], rhs_vec[pivot_row]);
+            }
+            
+            // eliminate all rows below pivot
+            for (size_t r = pivot_row + 1; r < num_rows; r++) {
+                if (matrix[r][col]) {
+                    for (size_t c = 0; c < num_variables; c++) {
+                        matrix[r][c] = matrix[r][c] != matrix[pivot_row][c];
+                    }
+                    rhs_vec[r] = rhs_vec[r] != rhs_vec[pivot_row];
+                }
+            }
+            
+            pivot_row++;
         }
-    }
-    
-    // no new watch found, check if other watch is satisfied or if we have a conflict
-    Literal otherWatch = (watch1 == falseLit) ? watch2 : watch1;
-    int otherVar = abs(otherWatch) - 1;
-    
-    if (otherVar < 0 || otherVar >= formula.numVariables || otherVar >= assignment.size()) {
-        conflictClause = clauseIdx;
-        return false;
-    }
-    
-    // Check if the other watch is satisfied
-    bool otherSatisfied = false;
-    if (assignment[otherVar].value != -1) {
-        otherSatisfied = (otherWatch > 0) ? (assignment[otherVar].value == 1) : (assignment[otherVar].value == 0);
-    }
-    
-    if (assignment[otherVar].value == -1) {
-        // propagate
-        assignment[otherVar].value = (otherWatch > 0) ? 1 : 0;
-        assignment[otherVar].decisionLevel = currentLevel;
-        assignment[otherVar].antecedent = clauseIdx;
-        return false;
-    } else if (otherSatisfied) {
-        return true; // clause satisfied
-    } else {
-        conflictClause = clauseIdx;
-        return false; // conflict
-    }
-}
-
-void ApproximateCounter::analyzeConflict(const CNFFormula& formula, const vector<Clause>& learnedClauses, const vector<CDCLAssignment>& assignment, int conflictClause, Clause& learnedClause, int& backtrackLevel, VSIDSScores& vsids) {
-    const Clause* clause = nullptr;
-    if (conflictClause < formula.clauses.size()) {
-        clause = &formula.clauses[conflictClause];
-    } else {
-        clause = &learnedClauses[conflictClause - formula.clauses.size()];
-    }
-    
-    // find highest decision level in the conflict clause
-    int conflictLevel = 0;
-    for (Literal lit : clause->literals) {
-        int var = abs(lit) - 1;
-        if (var < formula.numVariables && assignment[var].decisionLevel > conflictLevel) {
-            conflictLevel = assignment[var].decisionLevel;
-        }
-    }
-    
-    // learn conflict
-    learnedClause.literals = clause->literals;
-    for (Literal lit : learnedClause.literals) {
-        int var = abs(lit) - 1;
-        if (var < formula.numVariables) {
-            vsids.bump(var);
-        }
-    }
-    
-    // find backtrack level
-    vector<int> levels;
-    for (Literal lit : learnedClause.literals) {
-        int var = abs(lit) - 1;
-        if (var < formula.numVariables) {
-            int level = assignment[var].decisionLevel;
-            if (level >= 0 && find(levels.begin(), levels.end(), level) == levels.end()) {
-                levels.push_back(level);
+        
+        // get assignment from reduced matrix
+        for (int r = static_cast<int>(num_rows) - 1; r >= 0; r--) {
+            // find leading variable in this row
+            int lead_var = -1;
+            for (size_t c = 0; c < num_variables; c++) {
+                if (matrix[r][c]) {
+                    lead_var = c;
+                    break;
+                }
+            }
+            
+            if (lead_var >= 0) {
+                bool value = rhs_vec[r];
+                // XOR with already assigned variables
+                for (size_t c = lead_var + 1; c < num_variables; c++) {
+                    if (matrix[r][c]) {
+                        Variable v = c + 1;
+                        if (assignment.find(v) != assignment.end()) {
+                            value = value != assignment[v];
+                        }
+                    }
+                }
+                assignment[lead_var + 1] = value;
             }
         }
     }
     
-    sort(levels.begin(), levels.end());
-    backtrackLevel = (levels.size() > 1) ? levels[levels.size() - 2] : 0;
+    return assignment;
 }
 
-void ApproximateCounter::initWatches(const CNFFormula& formula, const vector<Clause>& learnedClauses, WatchedLiterals& watches, int numVars) {
-    // two watches per clause
-    for (size_t i = 0; i < formula.clauses.size(); i++) {
-        const Clause& clause = formula.clauses[i];
-        if (clause.literals.size() >= 2) {
-            Literal lit0 = clause.literals[0];
-            Literal lit1 = clause.literals[1];
-            int idx0 = watches.litToIndex(lit0, numVars);
-            int idx1 = watches.litToIndex(lit1, numVars);
-            watches.watches[idx0].push_back(i);
-            watches.watches[idx1].push_back(i);
-        } else if (clause.literals.size() == 1) {
-            Literal lit0 = clause.literals[0];
-            int idx0 = watches.litToIndex(lit0, numVars);
-            watches.watches[idx0].push_back(i);
-        }
-    }
+void ApproximateCounter::compute_bounds(double threshold, uint32_t num_variables, CountResult& result) {
+    // compute confidence bounds based on epsilon and delta
+    double factor = exp(config_.epsilon);
+    
+    result.lower_bound = result.count / factor;
+    result.upper_bound = result.count * factor;
 }
+
+} // namespace sharpsat

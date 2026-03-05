@@ -1,2 +1,5 @@
-# Python dependencies for machine learning model
-# PyTorch/TensorFlow, NumPy, scikit-learn, etc.
+numpy>=1.21.0
+xgboost>=2.0.0
+scikit-learn>=1.3.0
+pandas>=2.0.0
+joblib>=1.3.0

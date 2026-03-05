@@ -1,43 +1,66 @@
-// Source file for XOR hash generator implementation
-
 #include "xor/xor_hash_generator.h"
-#include <algorithm>
-#include <chrono>
+#include <cmath>
 
 using namespace std;
+namespace sharpsat {
 
-// random number generator
-mt19937 XORHashGenerator::rng(chrono::steady_clock::now().time_since_epoch().count());
-
-void XORHashGenerator::setSeed(unsigned int seed) {
-    rng.seed(seed);
+// Constructors
+XorHashGenerator::XorHashGenerator(uint32_t seed) 
+    : rng_(seed), uniform_dist_(0.0, 1.0), bool_dist_(0, 1) {
 }
 
-XORConstraint XORHashGenerator::generateSparseXOR(int numVariables, double density) {
-    XORConstraint xor_constraint;
-    uniform_real_distribution<double> dist(0.0, 1.0);
+void XorHashGenerator::set_seed(uint32_t seed) {
+    rng_.seed(seed);
+}
+
+// Generate random sparse XOR constraints
+vector<XorConstraint> XorHashGenerator::generate_random_hashes(uint32_t num_variables, uint32_t num_hashes, double sparsity) {
+    vector<XorConstraint> constraints;
+    constraints.reserve(num_hashes);
     
-    // add to XOR constraint with probability = density
-    for (int i = 1; i <= numVariables; ++i) {
-        if (dist(rng) < density) {
-            xor_constraint.variables.push_back(i);
+    for (uint32_t i = 0; i < num_hashes; i++) {
+        constraints.push_back(generate_single_hash(num_variables, sparsity));
+    }
+    
+    return constraints;
+}
+
+// Generate a single random XOR constraint
+XorConstraint XorHashGenerator::generate_single_hash(
+    uint32_t num_variables,
+    double sparsity) {
+    
+    XorConstraint constraint;
+    
+    // randomly select variables based on sparsity
+    for (uint32_t var = 1; var <= num_variables; var++) {
+        if (uniform_dist_(rng_) < sparsity) {
+            constraint.variables.push_back(var);
         }
     }
     
-    // randomly assign value
-    uniform_int_distribution<int> value(0, 1);
-    xor_constraint.value = value(rng);
-    
-    return xor_constraint;
-}
-
-vector<XORConstraint> XORHashGenerator::generateXORFamily(int numVariables, int numXORs, double density) {
-    vector<XORConstraint> xors;
-    xors.reserve(numXORs);
-    
-    for (int i = 0; i < numXORs; ++i) {
-        xors.push_back(generateSparseXOR(numVariables, density));
+    // ensure at least one variable
+    if (constraint.variables.empty() && num_variables > 0) {
+        uniform_int_distribution<uint32_t> var_dist(1, num_variables);
+        constraint.variables.push_back(var_dist(rng_));
     }
     
-    return xors;
+    // random RHS (0 or 1)
+    constraint.rhs = bool_dist_(rng_) == 1;
+    
+    return constraint;
 }
+
+// Get recommended sparsity for given problem size
+double XorHashGenerator::get_recommended_sparsity(uint32_t num_variables) {
+    // larger problems typically require sparser XORs to keep cell sizes manageable
+    if (num_variables < 100) {
+        return 0.5;
+    } else if (num_variables < 1000) {
+        return 0.4;
+    } else {
+        return 0.35;
+    }
+}
+
+} // namespace sharpsat

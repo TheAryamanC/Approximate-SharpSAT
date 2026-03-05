@@ -1,125 +1,78 @@
-// Header file for approximate counting
-
 #ifndef APPROXIMATE_COUNTER_H
 #define APPROXIMATE_COUNTER_H
 
-#include <vector>
-#include <memory>
 #include "cnf/cnf_structure.h"
 #include "xor/xor_hash_generator.h"
+#include "xor/ml_hash_interface.h"
+#include "solver/sat_solver.h"
+#include <memory>
+#include <vector>
 
-// Single counting trial result
-struct TrialResult {
-    bool satisfiable;
-    uint64_t solutionCount;
-    int numXORs;
-    int freeVariables;
-    int assignedVariables;
+namespace sharpsat {
+
+// Configuration for approximate counting
+struct CounterConfig {
+    double epsilon;           // Approximation factor (tolerance) - e.g., 0.8 means count is within factor of exp(0.8) ~ 2.2
+    double delta;             // Confidence parameter - e.g., 0.2 means 80% confidence
+    uint32_t seed;            // Random seed
+    bool use_ml_hashes;       // Use ML-enhanced hash generation -- to see if any benefit by running a 2x2 grid of trials
+    bool use_cuda;            // Enable CUDA acceleration -- to see if any benefit by running a 2x2 grid of trials
+    double pivot_threshold;   // Threshold for satisfiability checks
+    uint32_t max_iterations;  // Maximum iterations per threshold
     
-    TrialResult() : 
-        satisfiable(false),
-        solutionCount(0),
-        numXORs(0),
-        freeVariables(0),
-        assignedVariables(0) {}
+    CounterConfig()
+        : epsilon(0.8), delta(0.2), seed(42), use_ml_hashes(false),
+          use_cuda(true), pivot_threshold(9.0), max_iterations(10) {}
 };
 
-// Final approximation result - using multiple aggregated trials
-struct ApproximationResult {
-    uint64_t estimatedCount;
-    double averageCount;
-    int successfulTrials;
-    int totalTrials;
-    std::vector<uint64_t> trialCounts;
+// Result of approximate counting
+struct CountResult {
+    double count;             // Estimated model count
+    double lower_bound;       // Lower bound on count
+    double upper_bound;       // Upper bound on count
+    uint32_t num_iterations;  // Number of iterations performed
+    double time_seconds;      // Total time taken - compare timing using ML + CUDA
+    bool successful;          // Whether counting was successful
     
-    ApproximationResult() : 
-        estimatedCount(0), 
-        averageCount(0.0), 
-        successfulTrials(0), 
-        totalTrials(0) {}
+    CountResult()
+        : count(0.0), lower_bound(0.0), upper_bound(0.0),
+          num_iterations(0), time_seconds(0.0), successful(false) {}
 };
 
+// Approximate model counter
 class ApproximateCounter {
 public:
-    // Run approximate counting with multiple trials
-    static ApproximationResult approximateCount(const CNFFormula& formula, int numTrials = 10, int numXORs = 3, double density = 0.1);
-        
-    // Run trial with adaptive XOR count
-    static TrialResult singleTrial(const CNFFormula& formula, double density, int threshold = 50);
+    explicit ApproximateCounter(const CounterConfig& config = CounterConfig());
     
-    // Aggregate results from multiple trials
-    static ApproximationResult aggregateResults(const std::vector<TrialResult>& trials);
+    // Main counting interface
+    CountResult count(const CNF& cnf);
+    
+    // Set configuration
+    void set_config(const CounterConfig& config) { config_ = config; }
+    const CounterConfig& get_config() const { return config_; }
     
 private:
-    struct CDCLAssignment {
-        int value;           // -1 = unassigned, 0 = false, 1 = true
-        int decisionLevel;   // Which level was this assigned at
-        int antecedent;
-    };
+    // Core counting algorithm - inspired by ApproxMC
+    CountResult approxmc(const CNF& cnf);
     
-    struct WatchedLiterals {
-        std::vector<std::vector<int>> watches;  // list of clause indices
-        
-        void init(int numVars, int numClauses) {
-            watches.resize(numVars * 2);
-        }
-        
-        int litToIndex(Literal lit, int numVars) const {
-            int var = abs(lit) - 1;
-            return (lit > 0) ? (2 * var) : (2 * var + 1);
-        }
-    };
+    // Find pivot threshold m such that adding m XOR constraints - formula is SAT with high probability
+    uint32_t find_pivot_threshold(const CNF& cnf);
     
-    struct VSIDSScores {
-        std::vector<double> scores;
-        double decay = 0.95;
-        double increment = 1.0;
-        
-        void init(int numVars) {
-            scores.resize(numVars, 0.0);
-        }
-        
-        void bump(int var) {
-            scores[var] += increment;
-        }
-        
-        void decayAll() {
-            increment /= decay;
-        }
-        
-        int selectUnassigned(const std::vector<CDCLAssignment>& assignment) {
-            int bestVar = -1;
-            double bestScore = -1.0;
-            for (size_t i = 0; i < assignment.size(); i++) {
-                if (assignment[i].value == -1 && scores[i] > bestScore) {
-                    bestScore = scores[i];
-                    bestVar = i;
-                }
-            }
-            return bestVar;
-        }
-    };
+    // Check satisfiability with XOR constraints
+    bool check_sat_with_xors(const CNF& cnf, const std::vector<XorConstraint>& xors, std::unordered_map<Variable, bool>& assignment);
     
-    // Count solutions in simplified CNF up to maxCount (bounded enumeration)
-    static uint64_t countSolutions(const CNFFormula& simplified, int maxCount);
+    // Apply XOR constraints via Gaussian elimination
+    std::unordered_map<Variable, bool> apply_xor_constraints(const std::vector<XorConstraint>& xors, uint32_t num_variables);
     
-    // Find next solution different from current assignment
-    static bool findNextSolution(const CNFFormula& formula, std::vector<int>& assignment);
+    // Compute bounds from threshold
+    void compute_bounds(double threshold, uint32_t num_variables, CountResult& result);
     
-    // SAT solver
-    static bool solveSAT(const CNFFormula& formula, std::vector<int>& assignment, int varIndex);
-    
-    // CDCL Helper Methods
-    static bool cdclSolve(const CNFFormula& formula, std::vector<CDCLAssignment>& assignment, std::vector<Clause>& learnedClauses, WatchedLiterals& watches, VSIDSScores& vsids, int& conflicts, int& restartThreshold);
-    
-    static bool propagate(const CNFFormula& formula, const std::vector<Clause>& learnedClauses, std::vector<CDCLAssignment>& assignment, WatchedLiterals& watches, int currentLevel, int& conflictClause);
-    
-    static void analyzeConflict(const CNFFormula& formula, const std::vector<Clause>& learnedClauses, const std::vector<CDCLAssignment>& assignment, int conflictClause, Clause& learnedClause, int& backtrackLevel, VSIDSScores& vsids);
-    
-    static void initWatches(const CNFFormula& formula, const std::vector<Clause>& learnedClauses, WatchedLiterals& watches, int numVars);
-    
-    static bool updateWatch(const CNFFormula& formula, const std::vector<Clause>& learnedClauses, int clauseIdx, Literal falseLit, std::vector<CDCLAssignment>& assignment, WatchedLiterals& watches, int currentLevel, int& conflictClause);
+    CounterConfig config_;
+    std::unique_ptr<XorHashGenerator> hash_generator_;
+    std::unique_ptr<MLHashInterface> ml_interface_;
+    std::unique_ptr<SATSolver> sat_solver_;
 };
 
+} // namespace sharpsat
 
 #endif // APPROXIMATE_COUNTER_H
