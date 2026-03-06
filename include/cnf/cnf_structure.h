@@ -33,7 +33,7 @@ struct Clause {
     void add_literal(Literal lit) { literals.push_back(lit); }
 };
 
-// XOR constraint: x1 ^ x2 ^ ... ^ xn = bool
+// An xor constraint is an XOR of variables equalling a boolean value
 struct XorConstraint {
     std::vector<Variable> variables;
     bool rhs;  // right-hand side (0 or 1)
@@ -45,42 +45,44 @@ struct XorConstraint {
     size_t size() const { return variables.size(); }
 };
 
-// A CNF is an AND of clauses (and XOR constraints)
+// A CNF is an AND of clauses and XOR constraints
+// This is the main data structure for representing the input formula used by the system
 class CNF {
 public:
     CNF() : num_variables_(0), num_clauses_(0) {}
     
+    // getters
     uint32_t num_variables() const { return num_variables_; }
     uint32_t num_clauses() const { return num_clauses_; }
     const std::vector<Clause>& clauses() const { return clauses_; }
     std::vector<Clause>& clauses() { return clauses_; }
     
+    // modifiers
     void add_clause(const Clause& clause);
     void add_clause(const std::vector<Literal>& literals);
     
     void set_num_variables(uint32_t n) { num_variables_ = n; }
     
+    // compute variable occurrences for heuristics
     void compute_variable_occurrences();
     const std::vector<uint32_t>& get_variable_occurrences() const { 
         return variable_occurrences_; 
     }
-    
-    // Get literal occurrences (positive and negative separately)
     uint32_t get_positive_occurrences(Variable var) const;
     uint32_t get_negative_occurrences(Variable var) const;
     
-    // Check empty
+    // check empty
     bool has_empty_clause() const;
     bool is_empty() const { return clauses_.empty(); }
     
-    // Statistics
+    // statistics
     double avg_clause_size() const;
     uint32_t max_clause_size() const;
     
-    // Apply partial assignment
+    // apply partial assignment
     void apply_assignment(const std::unordered_map<Variable, bool>& assignment);
     
-    // Clone
+    // clone - creates a deep copy of the CNF, useful for not modifying original during simplification and branching
     CNF clone() const;
     
 private:

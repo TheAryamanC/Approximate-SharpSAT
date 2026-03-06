@@ -1,5 +1,4 @@
 #include "utils/timer.h"
-#include "utils/logger.h"
 #include <iostream>
 #include <cassert>
 #include <thread>

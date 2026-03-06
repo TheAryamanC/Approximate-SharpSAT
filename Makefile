@@ -11,9 +11,9 @@ BIN_DIR = bin
 TEST_DIR = tests
 
 # Compiler flags
-CXXFLAGS = -std=c++17 -O3 -march=native -pthread -I$(INCLUDE_DIR)
-NVCCFLAGS = -ccbin=$(NVCC_HOST_COMPILER) -std=c++14 -O3 --use_fast_math --expt-relaxed-constexpr -Xcompiler -march=native -I$(INCLUDE_DIR)
-CUDAFLAGS = -lcudart -lcuda
+CXXFLAGS = -std=c++17 -O3 -march=native -pthread -fopenmp -I$(INCLUDE_DIR)
+NVCCFLAGS = -ccbin=$(NVCC_HOST_COMPILER) -std=c++14 -O3 --use_fast_math --expt-relaxed-constexpr -Xcompiler -march=native -Xcompiler -fopenmp -I$(INCLUDE_DIR)
+CUDAFLAGS = -lcudart -lcuda -lgomp
 
 # CUDA architectures
 CUDA_ARCH = -arch=sm_75 -gencode=arch=compute_75,code=sm_75 \

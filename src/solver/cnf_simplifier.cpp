@@ -1,5 +1,4 @@
 #include "solver/cnf_simplifier.h"
-#include "utils/logger.h"
 #include <algorithm>
 
 using namespace std;

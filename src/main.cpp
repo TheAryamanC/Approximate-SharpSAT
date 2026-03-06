@@ -1,6 +1,5 @@
 #include "cnf/cnf_parser.h"
 #include "solver/approximate_counter.h"
-#include "utils/logger.h"
 #include "utils/timer.h"
 #include "cuda_interface.h"
 #include <iostream>
@@ -10,7 +9,7 @@
 using namespace std;
 using namespace sharpsat;
 
-// Application configuration structure
+// configuration
 struct AppConfig {
     string input_file;
     double epsilon = 0.8;
@@ -19,117 +18,102 @@ struct AppConfig {
     bool use_cuda = true;
     uint32_t seed = 42;
     double timeout_seconds = 60.0;
-    uint32_t num_trials = 0;  // 0 means calculate from epsilon/delta
+    uint32_t num_trials = 0;        // calculate from epsilon/delta
     bool verbose = false;
     bool show_gpu_info = false;
     
-    // Track what user specified
+    // user can only specify one of epsilon/delta or trials
     bool epsilon_specified = false;
     bool delta_specified = false;
     bool trials_specified = false;
 };
 
-// Calculate number of trials from epsilon and delta using ApproxMC formula
+// calculate number of trials from epsilon and delta: iterations = 3 × ln(3/delta) / epsilon²
 uint32_t calculate_trials(double epsilon, double delta) {
-    // Formula: iterations = 3 × ln(3/δ) / ε²
-    double iterations = 3.0 * std::log(3.0 / delta) / (epsilon * epsilon);
-    return static_cast<uint32_t>(std::ceil(iterations));
+    double iterations = 3.0 * log(3.0 / delta) / (epsilon * epsilon);
+    return static_cast<uint32_t>(ceil(iterations));
 }
 
-// Back-calculate epsilon from trials (assuming delta=0.2)
+// calculate epsilon from trials (with standard delta=0.2): iterations = 3 × ln(3/δ) / ε²
 double calculate_epsilon(uint32_t trials, double delta = 0.2) {
-    // From: trials = 3 × ln(3/δ) / ε²
-    // Solve for ε: ε = sqrt(3 × ln(3/δ) / trials)
-    double epsilon_sq = 3.0 * std::log(3.0 / delta) / trials;
-    return std::sqrt(epsilon_sq);
+    double epsilon_sq = 3.0 * log(3.0 / delta) / trials;
+    return sqrt(epsilon_sq);
 }
 
-// Explain usage instructions
 void print_usage(const char* prog_name) {
-    cout << "Usage: " << prog_name << " <cnf_file> [options]\n"
-         << "\nOptions:\n"
-         << "  --epsilon <float>   Approximation factor (default: 0.8)\n"
-         << "  --delta <float>     Confidence parameter (default: 0.2)\n"
-         << "                      Note: Cannot be used with --trials\n"
-         << "  --trials <int>      Number of trials to run\n"
-         << "                      If specified, epsilon is calculated for delta=0.2\n"
-         << "                      Cannot be used with --epsilon/--delta\n"
-         << "  --timeout <float>   Timeout in seconds per SAT call (default: 60.0)\n"
-         << "  --use-ml            Enable ML-enhanced hash generation\n"
-         << "  --no-cuda           Disable CUDA acceleration\n"
-         << "  --seed <int>        Random seed (default: 42)\n"
-         << "  --verbose           Enable detailed logging\n"
-         << "  --gpu-info          Show GPU information\n"
-         << "  --help              Show this help message\n"
-         << "\nDefault behavior:\n"
-         << "  If neither --trials nor --epsilon/--delta is specified:\n"
-         << "  - Uses epsilon=0.8, delta=0.2\n"
-         << "  - Calculates trials = 3×ln(3/δ)/ε² ≈ 13\n"
-         << "\nExamples:\n"
-         << "  " << prog_name << " formula.cnf --epsilon 0.5 --delta 0.1\n"
-         << "  " << prog_name << " formula.cnf --trials 50\n";
+    cout << "Usage: " << prog_name << " <cnf_file> [options]" << endl;
+    cout << "Options:" << endl;
+    cout << "  --epsilon <float>   Approximation factor (default: 0.8) - Note: Cannot be used with --trials" << endl;
+    cout << "  --delta <float>     Confidence parameter (default: 0.2) - Note: Cannot be used with --trials" << endl;
+    cout << "  --trials <int>      Number of trials to run (default: calculated from epsilon/delta) - Note: Cannot be used with --epsilon/--delta" << endl;
+    cout << "  --timeout <float>   Timeout in seconds per SAT call (default: 60)" << endl;
+    cout << "  --use-ml            Enable ML-enhanced hash generation" << endl;
+    cout << "  --no-cuda           Disable CUDA acceleration" << endl;
+    cout << "  --seed <int>        Random seed (default: 42)" << endl;
+    cout << "  --verbose           Enable detailed logging" << endl;
+    cout << "  --gpu-info          Show GPU information" << endl;
+    cout << "  --help              Show this help message" << endl;
 }
 
-// Parse command-line arguments
+// parse command-line arguments
 bool parse_args(int argc, char** argv, AppConfig& config) {
     if (argc < 2) {
         return false;
     }
     
-    // Check for help flag first
+    // check if --help is present anywhere in the arguments
     for (int i = 1; i < argc; i++) {
         string arg = argv[i];
-        if (arg == "--help" || arg == "-h") {
+        if (arg == "--help") {
             return false;
         }
     }
     
+    // first argument is the input CNF file
     config.input_file = argv[1];
     
+    // parse options
     for (int i = 2; i < argc; i++) {
         string arg = argv[i];
         
-        if (arg == "--help" || arg == "-h") {
+        if (arg == "--help") {
             return false;
         } else if (arg == "--epsilon" && i + 1 < argc) {
             config.epsilon = stod(argv[++i]);
             config.epsilon_specified = true;
         } else if (arg == "--delta" && i + 1 < argc) {
-            config.delta = std::stod(argv[++i]);
+            config.delta = stod(argv[++i]);
             config.delta_specified = true;
         } else if (arg == "--timeout" && i + 1 < argc) {
-            config.timeout_seconds = std::stod(argv[++i]);
+            config.timeout_seconds = stod(argv[++i]);
         } else if (arg == "--trials" && i + 1 < argc) {
-            config.num_trials = std::stoul(argv[++i]);
+            config.num_trials = stoul(argv[++i]);
             config.trials_specified = true;
         } else if (arg == "--use-ml") {
             config.use_ml = true;
         } else if (arg == "--no-cuda") {
             config.use_cuda = false;
         } else if (arg == "--seed" && i + 1 < argc) {
-            config.seed = std::stoul(argv[++i]);
-        } else if (arg == "--verbose" || arg == "-v") {
+            config.seed = stoul(argv[++i]);
+        } else if (arg == "--verbose") {
             config.verbose = true;
         } else if (arg == "--gpu-info") {
             config.show_gpu_info = true;
         } else {
-            std::cerr << "Unknown option: " << arg << std::endl;
+            cerr << "Unknown option: " << arg << endl;
             return false;
         }
     }
     
-    // Validate mutually exclusive options
+    // make sure that only one of trials or epsilon/delta is specified and calculate the other
     if (config.trials_specified && (config.epsilon_specified || config.delta_specified)) {
-        std::cerr << "Error: Cannot specify both --trials and --epsilon/--delta\n";
-        std::cerr << "Use --trials to directly set iterations, OR use --epsilon/--delta to calculate them.\n";
+        cerr << "Error: Cannot specify both --trials and --epsilon/--delta" << endl;
+        cerr << "Use --trials to directly set iterations, OR use --epsilon/--delta to calculate them" << endl;
         return false;
     }
-    
-    // Calculate trials from epsilon/delta if not specified
     if (!config.trials_specified) {
         config.num_trials = calculate_trials(config.epsilon, config.delta);
     } else {
-        // Back-calculate epsilon from trials (with delta=0.2)
         config.delta = 0.2;
         config.epsilon = calculate_epsilon(config.num_trials, config.delta);
     }
@@ -137,50 +121,37 @@ bool parse_args(int argc, char** argv, AppConfig& config) {
     return true;
 }
 
-// Main entry point
+// main function - runs the program
 int main(int argc, char** argv) {
+    // parse command-line arguments
     AppConfig config;
-    
     if (!parse_args(argc, argv, config)) {
         print_usage(argv[0]);
         return 1;
     }
     
-    // set logging level
-    if (config.verbose) {
-        Logger::instance().set_verbose(true);
-    }
-    
-    LOG_INFO("SharpSAT: GPU-Accelerated Approximate Model Counter");
-    LOG_INFO("===================================================");
-    
-    // check CUDA availability
-    if (config.use_cuda) {
-        if (cuda::is_cuda_available()) {
-            LOG_INFO("CUDA is available");
-            if (config.show_gpu_info) {
-                cuda::print_gpu_info(0);
-            }
-        } else {
-            LOG_WARNING("CUDA not available, falling back to CPU");
-            config.use_cuda = false;
-        }
-    }
+    // print header
+    cout << "GPU-Accelerated Approximate Model Counter" << endl;
+    cout << "=========================================" << endl;
     
     // parse CNF file
-    LOG_INFO("Parsing CNF file: ", config.input_file);
+    if (config.verbose) {
+        cout << "Parsing CNF file: " << config.input_file << endl;
+    }
     Timer parse_timer;
     auto cnf = CNFParser::parse_file(config.input_file);
     
     if (!cnf) {
-        LOG_ERROR("Failed to parse CNF file");
+        cerr << "  ERROR: Failed to parse CNF file" << endl;
         return 1;
     }
     
-    LOG_INFO("Parsed formula in ", parse_timer.elapsed_seconds(), " seconds");
-    LOG_INFO("Variables: ", cnf->num_variables());
-    LOG_INFO("Clauses: ", cnf->num_clauses());
-    LOG_INFO("Average clause size: ", cnf->avg_clause_size());
+    if (config.verbose){
+        cout << "  Parsed formula in " << parse_timer.elapsed_seconds() << " seconds" << endl;
+        cout << "  Variables: " << cnf->num_variables() << endl;
+        cout << "  Clauses: " << cnf->num_clauses() << endl;
+        cout << "  Average clause size: " << cnf->avg_clause_size() << endl;
+    }
     
     // configure counter
     CounterConfig counter_config;
@@ -192,49 +163,48 @@ int main(int argc, char** argv) {
     counter_config.timeout_seconds = config.timeout_seconds;
     counter_config.num_trials = config.num_trials;
     
-    // Log parameter configuration
-    LOG_INFO("Configuration:");
-    LOG_INFO("  Epsilon: ", counter_config.epsilon);
-    LOG_INFO("  Delta: ", counter_config.delta);
-    LOG_INFO("  Trials: ", counter_config.num_trials, 
-             config.trials_specified ? " (user-specified)" : " (calculated from epsilon/delta)");
+    // show configuration
+    cout << "Configuration:" << endl;
+    cout << "  Epsilon: " << counter_config.epsilon << endl;
+    cout << "  Delta: " << counter_config.delta << endl;
+    cout << "  Timeout: " << counter_config.timeout_seconds << " seconds" << endl;
+    cout << "  Trials: " << counter_config.num_trials << (config.trials_specified ? " (user-specified)" : " (calculated from epsilon/delta)") << endl;
     if (config.trials_specified) {
-        LOG_INFO("  Note: Epsilon back-calculated from trials for delta=0.2");
+        cout << "  Note: Epsilon calculated from trials for delta=0.2" << endl;
     }
     
     if (config.use_ml) {
-        LOG_INFO("ML-enhanced hash generation: ENABLED");
+        cout << "  ML-enhanced hash generation: ENABLED" << endl;
+    }
+
+    // check CUDA availability
+    if (config.use_cuda) {
+        if (cuda::is_cuda_available()) {
+            cout << "  CUDA: Enabled" << endl;            if (config.show_gpu_info) {
+                cuda::print_gpu_info(0);
+            }
+        } else {
+            cerr << "  WARNING: CUDA not available, falling back to CPU" << endl;
+            config.use_cuda = false;
+        }
     }
     
     // run approximate counting
-    LOG_INFO("\nStarting approximate model counting...");
-    LOG_INFO("---------------------------------------");
-    
+    cout << endl << "Running approximate model counting on " << config.input_file << endl;
     ApproximateCounter counter(counter_config);
     CountResult result = counter.count(*cnf);
     
     // print results
-    LOG_INFO("\n=== Results ===");
+    cout << endl << "Results:" << endl;
     if (result.successful) {
-        std::cout << "\nApproximate Model Count: " << result.count << std::endl;
-        std::cout << "Lower Bound: " << result.lower_bound << std::endl;
-        std::cout << "Upper Bound: " << result.upper_bound << std::endl;
-        std::cout << "Iterations: " << result.num_iterations << std::endl;
-        std::cout << "Time: " << result.time_seconds << " seconds" << std::endl;
-        
-        LOG_INFO("\nCount: ", result.count);
-        LOG_INFO("Bounds: [", result.lower_bound, ", ", result.upper_bound, "]");
-        LOG_INFO("Iterations: ", result.num_iterations);
-        LOG_INFO("Time: ", result.time_seconds, " seconds");
+        cout << "  Approximate Model Count: " << result.count << endl;
+        cout << "  Lower Bound: " << result.lower_bound << endl;
+        cout << "  Upper Bound: " << result.upper_bound << endl;
+        cout << "  Iterations: " << result.num_iterations << endl;
+        cout << "  Time: " << result.time_seconds << " seconds" << endl;
     } else {
-        LOG_ERROR("Counting failed");
+        cerr << "  ERROR: Counting failed" << endl;
         return 1;
-    }
-    
-    // print timing statistics
-    if (config.verbose) {
-        LOG_INFO("\n=== Timing Statistics ===");
-        TimerRegistry::instance().print_all();
     }
     
     return 0;

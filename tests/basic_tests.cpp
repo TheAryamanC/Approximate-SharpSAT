@@ -2,7 +2,6 @@
 #include "cnf/cnf_structure.h"
 #include "solver/sat_solver.h"
 #include "solver/cnf_simplifier.h"
-#include "utils/logger.h"
 #include <iostream>
 #include <cassert>
 

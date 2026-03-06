@@ -1,6 +1,4 @@
-"""
-This script is called by the C++ program to predict optimal XOR sparsity based on features extracted from the CNF formula, using a pre-trained XGBoost model to make the prediction
-"""
+"""This script is called by the C++ program to predict optimal XOR sparsity based on features extracted from the CNF formula, using a pre-trained XGBoost model to make the prediction"""
 
 import numpy as np
 import sys

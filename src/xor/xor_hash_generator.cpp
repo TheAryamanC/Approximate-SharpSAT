@@ -4,7 +4,7 @@
 using namespace std;
 namespace sharpsat {
 
-// Constructors
+// constructors
 XorHashGenerator::XorHashGenerator(uint32_t seed) 
     : rng_(seed), uniform_dist_(0.0, 1.0), bool_dist_(0, 1) {
 }
@@ -13,7 +13,7 @@ void XorHashGenerator::set_seed(uint32_t seed) {
     rng_.seed(seed);
 }
 
-// Generate random sparse XOR constraints
+// generate random sparse XOR constraints
 vector<XorConstraint> XorHashGenerator::generate_random_hashes(uint32_t num_variables, uint32_t num_hashes, double sparsity) {
     vector<XorConstraint> constraints;
     constraints.reserve(num_hashes);
@@ -25,7 +25,7 @@ vector<XorConstraint> XorHashGenerator::generate_random_hashes(uint32_t num_vari
     return constraints;
 }
 
-// Generate a single random XOR constraint
+// generate a single random XOR constraint
 XorConstraint XorHashGenerator::generate_single_hash(
     uint32_t num_variables,
     double sparsity) {
@@ -51,16 +51,11 @@ XorConstraint XorHashGenerator::generate_single_hash(
     return constraint;
 }
 
-// Get recommended sparsity for given problem size
+// get recommended sparsity for given problem size (heuristic)
 double XorHashGenerator::get_recommended_sparsity(uint32_t num_variables) {
-    // larger problems typically require sparser XORs to keep cell sizes manageable
-    if (num_variables < 100) {
-        return 0.5;
-    } else if (num_variables < 1000) {
-        return 0.4;
-    } else {
-        return 0.35;
-    }
+    if (num_variables <= 60) return 0.5; 
+    // slowly decay sparsity as variables increase
+    return std::max(0.2, 0.5 * (log2(60) / log2(num_variables)));
 }
 
 } // namespace sharpsat

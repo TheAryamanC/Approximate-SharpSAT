@@ -1,48 +1,36 @@
 #include "solver/approximate_counter.h"
-#include "utils/logger.h"
 #include "utils/timer.h"
 #include "cuda_interface.h"
 #include <cmath>
 #include <algorithm>
+#include <iostream>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using namespace std;
 namespace sharpsat {
 
 // Constructor
-ApproximateCounter::ApproximateCounter(const CounterConfig& config)
-    : config_(config) {
-    
+ApproximateCounter::ApproximateCounter(const CounterConfig& config) : config_(config) {
     hash_generator_ = make_unique<XorHashGenerator>(config.seed);
-    // Initialize ML interface with model path
     ml_interface_ = make_unique<MLHashInterface>("src/ml_model/model.pkl");
-    // Set seed for randomization across trials
     ml_interface_->set_seed(config.seed);
-    // Use GPU if available
     bool use_gpu = sharpsat::cuda::is_cuda_available();
     sat_solver_ = make_unique<SATSolver>(config.timeout_seconds, use_gpu);
-    if (use_gpu) {
-        LOG_INFO("SAT solver initialized with GPU acceleration");
-    }
-    LOG_INFO("SAT solver timeout: ", config.timeout_seconds, " seconds");
-    LOG_INFO("Number of trials: ", config.num_trials);
 }
 
 // Main counting interface
 CountResult ApproximateCounter::count(const CNF& cnf) {
-    // start timer + log information
+    // start timer
     ScopedTimer timer("total_counting");
-    
-    LOG_INFO("Starting approximate model counting");
-    LOG_INFO("Formula: ", cnf.num_variables(), " variables, ", cnf.num_clauses(), " clauses");
-    LOG_INFO("Config: epsilon=", config_.epsilon, ", delta=", config_.delta);
     
     // run core counting algorithm
     CountResult result = approxmc(cnf);
     
-    // stop timer + log results
+    // stop timer
     result.time_seconds = TimerRegistry::instance().get_elapsed("total_counting");
-    LOG_INFO("Model count (approximate): ", result.count);
-    LOG_INFO("Total time: ", result.time_seconds, " seconds");
     
     return result;
 }
@@ -67,9 +55,7 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     }
     
     // find hash level (number of XOR constraints to apply)
-    LOG_INFO("Finding hash level...");
     uint32_t hash_level = find_hash_level(cnf);
-    LOG_INFO("Hash level: ", hash_level);
     
     // if hash level is 0, formula is UNSAT with high probability
     if (hash_level == 0) {
@@ -81,20 +67,34 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     }
     
     // run multiple iterations and get SAT count
-    // Use configured number of trials
     uint32_t num_iterations = config_.num_trials;
-    LOG_INFO("Running ", num_iterations, " iterations at hash level ", hash_level);
+    
+#ifdef _OPENMP
+    int num_threads = config_.use_cuda ? omp_get_max_threads() : 1;
+    omp_set_num_threads(num_threads);
+#endif
     
     uint32_t sat_count = 0;
+    
+    // parallelize iterations
+#ifdef _OPENMP
+    #pragma omp parallel for reduction(+:sat_count) if(config_.use_cuda)
+#endif
     for (uint32_t iter = 0; iter < num_iterations; iter++) {
-        // generate XOR constraints
+        // generate XOR constraints depending on configuration
+        // each thread needs its own hash generator to avoid race conditions
+        uint32_t thread_seed = config_.seed + iter;
+        XorHashGenerator thread_hash_gen(thread_seed);
+        
         vector<XorConstraint> xors;
         if (config_.use_ml_hashes) {
-            // ML interface now includes heuristic-based generation
-            xors = ml_interface_->generate_ml_hashes(cnf, hash_level);
+            // need thread-local instance of ML interface
+            MLHashInterface thread_ml("src/ml_model/model.pkl");
+            thread_ml.set_seed(thread_seed);
+            xors = thread_ml.generate_ml_hashes(cnf, hash_level);
         } else {
             double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
-            xors = hash_generator_->generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
+            xors = thread_hash_gen.generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
         }
         
         // check satisfiability with XOR constraints
@@ -102,36 +102,18 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
         if (check_sat_with_xors(cnf, xors, assignment)) {
             sat_count++;
         }
-        
-        // log progress every 10 iterations
-        if ((iter + 1) % 10 == 0) {
-            LOG_DEBUG("Completed ", iter + 1, "/", num_iterations, " iterations, SAT count: ", sat_count);
-        }
     }
     
     result.num_iterations = num_iterations;
     
     // estimate count based on SAT probability
     double sat_prob = static_cast<double>(sat_count) / num_iterations;
-    LOG_INFO("SAT outcomes: ", sat_count, " / ", num_iterations, " (", sat_prob * 100, "%)");
     
     if (sat_prob > 0.0) {
-        // ApproxMC estimation formula:
-        // hash_level k partitions solution space into ~2^k cells
-        // Each cell has expected size 2^(n-k) where n = num_variables
-        // cell_threshold is the target number of solutions per cell: ceil(4.03 * (1 + 1/epsilon)^2)
-        // 
-        // Total count estimation combines:
-        // - Cell size: 2^(n-k)
-        // - SAT probability adjustment: (num_iterations / sat_count)
-        // - Target threshold: cell_threshold
-        // 
-        // Formula: count = 2^(n-k) * (iterations / sat_count) * cell_threshold
-        
         double cell_threshold = config_.get_cell_threshold();
         double cell_size = pow(2.0, cnf.num_variables() - hash_level);
         
-        // Median estimator: adjust count based on observed SAT probability
+        // use median estimator - adjust count based on observed SAT probability
         result.count = cell_size * (static_cast<double>(num_iterations) / sat_count) * cell_threshold;
         
         // compute bounds
@@ -148,9 +130,7 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     return result;
 }
 
-// Binary search for optimal hash level (number of XOR constraints)
-// Goal: Find k such that formula with k XOR constraints is SAT with reasonable probability
-// This helps partition solution space optimally for counting
+// Find hash level (number of XOR constraints) where formula is SAT with reasonable probability
 uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
     uint32_t left = 0;
     uint32_t right = cnf.num_variables();
@@ -158,12 +138,12 @@ uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
     
     double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
     
-    // Binary search to find the largest hash level where formula is SAT with high probability
+    // binary search
     while (left <= right && right <= cnf.num_variables()) {
         uint32_t mid = (left + right) / 2;
         
         // run a few samples to estimate SAT probability at this hash level
-        uint32_t num_samples = 3;  // reduced from 10 for faster benchmarks
+        uint32_t num_samples = 5; // small number of samples for quick estimation
         uint32_t sat_samples = 0;
         
         for (uint32_t i = 0; i < num_samples; i++) {
@@ -184,9 +164,8 @@ uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
         
         // estimate SAT probability
         double sat_prob = static_cast<double>(sat_samples) / num_samples;
-        LOG_DEBUG("Hash level ", mid, ": SAT probability = ", sat_prob);
         
-        // We want sat_prob in a reasonable range (not too high, not too low)
+        // sat_prob in a reasonable range (not too high, not too low)
         if (sat_prob > 0.8) {
             // too many SAT, increase hash level (add more XOR constraints)
             hash_level = mid;
@@ -204,7 +183,7 @@ uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
     return hash_level;
 }
 
-// Check satisfiability with XOR constraints
+// Check if formula is satisfiable with added XOR constraints
 bool ApproximateCounter::check_sat_with_xors(const CNF& cnf, const vector<XorConstraint>& xors, unordered_map<Variable, bool>& assignment) {
     // apply XOR constraints via Gaussian elimination
     assignment = apply_xor_constraints(xors, cnf.num_variables());
@@ -237,10 +216,6 @@ unordered_map<Variable, bool> ApproximateCounter::apply_xor_constraints(const ve
         
         // GPU version - defined elsewhere
         bool success = sharpsat::cuda::gaussian_elimination_gpu(flat_vars, offsets, rhs, num_variables, assignment);
-        
-        if (!success) {
-            LOG_DEBUG("Gaussian elimination detected conflict");
-        }
     } else {
         // CPU version - simple Gaussian elimination
         vector<vector<bool>> matrix;
@@ -327,8 +302,7 @@ unordered_map<Variable, bool> ApproximateCounter::apply_xor_constraints(const ve
 
 void ApproximateCounter::compute_bounds(uint32_t hash_level, uint32_t num_variables, CountResult& result) {
     // compute confidence bounds based on epsilon and delta
-    double factor = exp(config_.epsilon);
-    
+    double factor = 1.0 + config_.epsilon;    
     result.lower_bound = result.count / factor;
     result.upper_bound = result.count * factor;
 }

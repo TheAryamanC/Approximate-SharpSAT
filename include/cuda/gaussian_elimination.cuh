@@ -5,7 +5,6 @@
 #include <vector>
 #include <unordered_map>
 
-// Forward declare in sharpsat namespace
 namespace sharpsat {
     struct XorConstraint;
 }
@@ -13,15 +12,7 @@ namespace sharpsat {
 namespace sharpsat {
 namespace cuda {
 
-// Represents XOR constraint in GPU-friendly format
-struct GPUXorConstraint {
-    uint32_t* variables;    // Array of variables
-    uint32_t size;          // Number of variables
-    bool rhs;               // Right-hand side
-};
-
-// Gaussian elimination on GPU
-// Converts XOR constraints into partial variable assignments
+// Gaussian elimination (GPU) - converts XOR constraints into partial variable assignments
 // Returns true if successful, false if contradiction detected
 bool gaussian_elimination_gpu(
     const std::vector<uint32_t>& xor_vars,          // Flattened variable array
@@ -39,29 +30,32 @@ void convert_xors_to_gpu_format(
     std::vector<uint8_t>& rhs
 );
 
-// Matrix row reduction on GPU (used internally)
+// Internal GPU kernels (implemented in gaussian_elimination.cu)
 namespace internal {
-    // Perform row reduction on a binary matrix
-    __global__ void row_reduce_kernel(
+    // Perform row reduction step on a binary matrix
+    // Eliminates pivot column in all rows except pivot row
+    __global__ void row_reduce_step_kernel(
         uint32_t* matrix,
         uint8_t* rhs,
         uint32_t num_rows,
         uint32_t num_cols,
+        uint32_t pivot_row,
         uint32_t pivot_col,
         uint8_t* has_conflict
     );
     
-    // Find pivot row for given column
-    __global__ void find_pivot_kernel(
+    // Find pivot row for given column (starting from start_row)
+    __global__ void find_pivot_in_column_kernel(
         const uint32_t* matrix,
         uint32_t num_rows,
         uint32_t num_cols,
-        uint32_t col,
-        uint32_t* pivot_row
+        uint32_t pivot_col,
+        uint32_t start_row,
+        uint32_t* pivot_row_out
     );
     
-    // Back substitution kernel
-    __global__ void back_substitution_kernel(
+    // Extract variable assignments from reduced matrix
+    __global__ void extract_assignments_kernel(
         const uint32_t* matrix,
         const uint8_t* rhs,
         uint32_t num_rows,

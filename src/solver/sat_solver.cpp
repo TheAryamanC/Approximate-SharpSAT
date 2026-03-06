@@ -1,9 +1,9 @@
 #include "solver/sat_solver.h"
-#include "utils/logger.h"
 #include "cuda_interface.h"
 #include "cuda/clause_evaluation.cuh"
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 
 using namespace std;
 namespace sharpsat {
@@ -36,7 +36,7 @@ bool SATSolver::solve(const CNF& cnf, const unordered_map<Variable, bool>& parti
     reset_stats();
     assignment_ = partial_assignment;
     
-    // Start timing
+    // start timing
     auto start = std::chrono::high_resolution_clock::now();
     start_time_ = std::chrono::duration<double>(start.time_since_epoch()).count();
     
@@ -67,14 +67,13 @@ bool SATSolver::dpll(CNF& cnf, unordered_map<Variable, bool>& assignment) {
     double current_time = std::chrono::duration<double>(now.time_since_epoch()).count();
     double elapsed = current_time - start_time_;
     
-    if (elapsed >= timeout_seconds_) {
-        LOG_DEBUG("SAT solver timeout after ", elapsed, " seconds");
+    if (elapsed >= timeout_seconds_) { // timeout exceeded - no solution found
         return false;
     }
     
     // propagate - use GPU if enabled and available
     if (use_gpu_ && sharpsat::cuda::is_cuda_available()) {
-        // Convert CNF to GPU format
+        // convert CNF to GPU format
         vector<vector<int32_t>> clause_vecs;
         for (const auto& clause : cnf.clauses()) {
             clause_vecs.push_back(clause.literals);
@@ -90,7 +89,7 @@ bool SATSolver::dpll(CNF& cnf, unordered_map<Variable, bool>& assignment) {
             return false;
         }
         
-        // Apply assignment to CNF
+        // apply assignment to CNF
         cnf.apply_assignment(assignment);
     } else {
         // CPU-based unit propagation

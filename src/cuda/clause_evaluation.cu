@@ -220,12 +220,15 @@ bool unit_propagation_gpu(
     uint32_t num_clauses = clause_offsets.size() - 1;
     const uint32_t MAX_UNIT_LITERALS = 10000;
     
+    // Allocate GPU memory
     DeviceArray<int32_t> d_clause_lits(clause_lits.size());
     DeviceArray<uint32_t> d_clause_offsets(clause_offsets.size());
     
+    // Copy to GPU
     d_clause_lits.copy_from_host(clause_lits.data(), clause_lits.size());
     d_clause_offsets.copy_from_host(clause_offsets.data(), clause_offsets.size());
     
+    // Iteratively find unit clauses and propagate until no more can be found
     bool changed = true;
     int max_iterations = 1000;
     int iteration = 0;
@@ -242,6 +245,7 @@ bool unit_propagation_gpu(
             values.push_back(pair.second ? 1 : 0);
         }
         
+        // Allocate GPU memory for assignments
         uint32_t num_assignments = vars.size();
         
         DeviceArray<uint32_t> d_vars(num_assignments > 0 ? num_assignments : 1);
@@ -257,6 +261,7 @@ bool unit_propagation_gpu(
         uint32_t zero = 0;
         d_num_units.copy_from_host(&zero, 1);
         
+        // Launch kernel to find unit clauses
         int block_size = 256;
         int num_blocks = (num_clauses + block_size - 1) / block_size;
         
@@ -268,6 +273,7 @@ bool unit_propagation_gpu(
         
         CUDA_CHECK(cudaDeviceSynchronize());
         
+        // Copy unit literals back to host
         uint32_t num_units = 0;
         d_num_units.copy_to_host(&num_units, 1);
         
@@ -279,6 +285,7 @@ bool unit_propagation_gpu(
             num_units = MAX_UNIT_LITERALS;
         }
         
+        // Process unit literals - assign variables and check for conflicts
         vector<int32_t> unit_literals(num_units);
         d_unit_literals.copy_to_host(unit_literals.data(), num_units);
         

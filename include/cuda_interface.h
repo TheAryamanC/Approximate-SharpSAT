@@ -5,7 +5,9 @@
 #include <vector>
 #include <unordered_map>
 
-// C++ interface to CUDA functions (implementation in CUDA files)
+/// <summary>
+///  C++ interface to CUDA functions (implementation in CUDA files)
+/// </summary>
 
 // Forward declaration from cnf_structure.h
 namespace sharpsat {
@@ -15,7 +17,7 @@ namespace sharpsat {
 namespace sharpsat {
 namespace cuda {
 
-// Print GPU information (declared here, defined in gpu_utils.cu)
+// Print GPU information
 void print_gpu_info(int device_id = 0);
 
 // Check if CUDA is available

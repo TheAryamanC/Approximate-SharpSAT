@@ -16,7 +16,10 @@ using namespace std;
 namespace sharpsat {
 namespace cuda {
 
-// kernel to perform one step in row reduction
+namespace internal {
+
+// Kernel to perform one step in row reduction
+// For each row (except pivot row), if it has a 1 in the pivot column, XOR it with the pivot row to eliminate that column
 __global__ void row_reduce_step_kernel(uint32_t* matrix, uint8_t* rhs, uint32_t num_rows, uint32_t num_cols, uint32_t pivot_row, uint32_t pivot_col, uint8_t* has_conflict) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -43,7 +46,8 @@ __global__ void row_reduce_step_kernel(uint32_t* matrix, uint8_t* rhs, uint32_t 
     }
 }
 
-// kernel to find pivot in column
+// Kernel to find pivot in a given column
+// Searches for the first row (starting from start_row) that has a 1 in pivot_col
 __global__ void find_pivot_in_column_kernel(const uint32_t* matrix, uint32_t num_rows, uint32_t num_cols, uint32_t pivot_col, uint32_t start_row, uint32_t* pivot_row_out) {
     int row = blockIdx.x * blockDim.x + threadIdx.x + start_row;
     
@@ -60,7 +64,8 @@ __global__ void find_pivot_in_column_kernel(const uint32_t* matrix, uint32_t num
     }
 }
 
-// kernel for back substitution
+// Kernel to extract variable assignments from reduced matrix
+// For each row, finds the leading variable (first 1) and assigns it the RHS value
 __global__ void extract_assignments_kernel(const uint32_t* matrix, const uint8_t* rhs, uint32_t num_rows, uint32_t num_cols, uint32_t* assignment_vars, uint8_t* assignment_values, uint32_t* num_assignments) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -94,7 +99,9 @@ __global__ void extract_assignments_kernel(const uint32_t* matrix, const uint8_t
     }
 }
 
-// utility function to convert XOR constraints to GPU format
+} // namespace internal
+
+// Utility function to convert XOR constraints to GPU-friendly flattened format
 void convert_xors_to_gpu_format(const vector<sharpsat::XorConstraint>& xors, vector<uint32_t>& flat_vars, vector<uint32_t>& offsets, vector<uint8_t>& rhs) {
     // pass by reference to avoid unnecessary copying - so need to clear them first
     flat_vars.clear();
@@ -166,7 +173,7 @@ bool gaussian_elimination_gpu(const vector<uint32_t>& xor_vars, const vector<uin
         d_pivot_row.copy_from_host(&init_pivot, 1);
         
         // launch kernel to find pivot in this column
-        find_pivot_in_column_kernel<<<num_blocks, block_size>>>(
+        internal::find_pivot_in_column_kernel<<<num_blocks, block_size>>>(
             d_matrix.data(), num_xors, num_variables, col, pivot_row, d_pivot_row.data()
         );
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -196,7 +203,7 @@ bool gaussian_elimination_gpu(const vector<uint32_t>& xor_vars, const vector<uin
         }
         
         // launch kernel to eliminate rows below pivot
-        row_reduce_step_kernel<<<num_blocks, block_size>>>(
+        internal::row_reduce_step_kernel<<<num_blocks, block_size>>>(
             d_matrix.data(), d_rhs.data(), num_xors, num_variables,
             pivot_row, col, d_has_conflict.data()
         );
@@ -220,7 +227,7 @@ bool gaussian_elimination_gpu(const vector<uint32_t>& xor_vars, const vector<uin
     d_num_assignments.copy_from_host(&zero, 1);
     
     // launch kernel to extract assignments from reduced matrix
-    extract_assignments_kernel<<<num_blocks, block_size>>>(
+    internal::extract_assignments_kernel<<<num_blocks, block_size>>>(
         d_matrix.data(), d_rhs.data(), num_xors, num_variables,
         d_assignment_vars.data(), d_assignment_values.data(), d_num_assignments.data()
     );

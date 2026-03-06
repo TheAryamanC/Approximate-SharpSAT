@@ -46,16 +46,15 @@ void print_gpu_info(int device_id) {
     try {
         GPUInfo info = get_gpu_info(device_id);
         
-        cout << "=== GPU Information ===" << endl;
-        cout << "Device ID: " << info.device_id << endl;
-        cout << "Name: " << info.name << endl;
-        cout << "Compute Capability: " << info.compute_capability_major << "." << info.compute_capability_minor << endl;
-        cout << "Total Memory: " << info.total_memory / (1024*1024) << " MB" << endl;
-        cout << "Free Memory: " << info.free_memory / (1024*1024) << " MB" << endl;
-        cout << "Multiprocessors: " << info.multiprocessor_count << endl;
-        cout << "Max Threads per Block: " << info.max_threads_per_block << endl;
-        cout << "Max Shared Memory per Block: " << info.max_shared_memory_per_block / 1024 << " KB" << endl;
-        cout << "=======================" << endl;
+        cout << "GPU Information:" << endl;
+        cout << "  Device ID: " << info.device_id << endl;
+        cout << "  Name: " << info.name << endl;
+        cout << "  Compute Capability: " << info.compute_capability_major << "." << info.compute_capability_minor << endl;
+        cout << "  Total Memory: " << info.total_memory / (1024*1024) << " MB" << endl;
+        cout << "  Free Memory: " << info.free_memory / (1024*1024) << " MB" << endl;
+        cout << "  Multiprocessors: " << info.multiprocessor_count << endl;
+        cout << "  Max Threads per Block: " << info.max_threads_per_block << endl;
+        cout << "  Max Shared Memory per Block: " << info.max_shared_memory_per_block / 1024 << " KB" << endl;
     } catch (const CUDAException& e) {
         cerr << "Error getting GPU info: " << e.what() << endl;
     }

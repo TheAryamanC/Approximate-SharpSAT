@@ -1,6 +1,4 @@
-"""
-XGBoost model training pipeline for XOR hash prediction
-"""
+"""XGBoost model training pipeline for XOR hash prediction"""
 
 import numpy as np
 import pandas as pd

@@ -14,7 +14,7 @@ namespace sharpsat {
 // Configuration for approximate counting
 struct CounterConfig {
     double epsilon;           // Approximation factor (tolerance) - e.g., 0.8 means count is within factor of exp(0.8) ~ 2.2
-    double delta;             // Confidence parameter - e.g., 0.2 means 80% confidence
+    double delta;             // Confidence parameter - e.g., 0.2 means 1-0.2 = 0.8 or 80% confidence
     uint32_t seed;            // Random seed
     bool use_ml_hashes;       // Use ML-enhanced hash generation
     bool use_cuda;            // Enable CUDA acceleration
@@ -25,7 +25,7 @@ struct CounterConfig {
         : epsilon(0.8), delta(0.2), seed(42), use_ml_hashes(false),
           use_cuda(true), timeout_seconds(60.0), num_trials(10) {}
     
-    // Calculate cell threshold from epsilon using ApproxMC formula: ceil(4.03 * (1 + 1/epsilon)^2)
+    // Calculate cell threshold from epsilon using formula: ceil(4.03 * (1 + 1/epsilon)^2)
     double get_cell_threshold() const {
         double ratio = 1.0 + 1.0 / epsilon;
         return std::ceil(4.03 * ratio * ratio);

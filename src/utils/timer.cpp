@@ -1,19 +1,19 @@
 #include "utils/timer.h"
-#include "utils/logger.h"
 #include <iomanip>
+#include <iostream>
 
+using namespace std;
 namespace sharpsat {
 
 void TimerRegistry::print_all() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
     
-    LOG_INFO("Timer Statistics:");
+    cout << "Timer Statistics:" << endl;
     for (const auto& pair : timers_) {
-        const std::string& name = pair.first;
+        const string& name = pair.first;
         const Timer& timer = pair.second;
         double elapsed = timer.elapsed_seconds();
-        LOG_INFO(name, ": ", std::fixed, std::setprecision(3), 
-                elapsed, " seconds (", std::setprecision(1), elapsed * 1000, " ms)");
+        cout << name << ": " << fixed << setprecision(3) << elapsed << " seconds (" << setprecision(1) << elapsed * 1000 << " ms)" << endl;
     }
 }
 

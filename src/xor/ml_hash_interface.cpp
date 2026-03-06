@@ -1,10 +1,10 @@
 #include "xor/ml_hash_interface.h"
-#include "utils/logger.h"
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <iostream>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -12,12 +12,12 @@
 using namespace std;
 namespace sharpsat {
 
-// Constructors
+// constructors
 MLHashInterface::MLHashInterface() 
     : model_available_(false), fallback_generator_(make_unique<XorHashGenerator>()),
       rng_(42), uniform_dist_(0.0, 1.0), bool_dist_(0, 1), noise_dist_(0.0, 0.05),
       python_stdin_(nullptr), python_stdout_(nullptr), python_stderr_(nullptr), python_pid_(-1) {
-    // Heuristic-based generation is always available
+
 }
 
 MLHashInterface::MLHashInterface(const string& model_path)
@@ -28,58 +28,55 @@ MLHashInterface::MLHashInterface(const string& model_path)
     initialize(model_path);
 }
 
-// Destructor
+// destructor
 MLHashInterface::~MLHashInterface() {
     stop_ml_server();
 }
 
-// Initialize ML model
+// initialize ML model
 bool MLHashInterface::initialize(const string& model_path) {
     model_path_ = model_path;
     
-    // Check if model file exists
+    // check if model file exists
     ifstream model_file(model_path);
     if (!model_file.good()) {
-        LOG_INFO("ML model not found at ", model_path, ", using heuristic-based approach");
         model_available_ = false;
         return false;
     }
     
-    // Start persistent Python ML server
+    // start persistent Python ML server (only open pipe once)
     if (start_ml_server()) {
-        LOG_INFO("ML model successfully loaded from ", model_path);
         model_available_ = true;
         return true;
     } else {
-        LOG_WARNING("Failed to start ML server, using heuristic-based approach");
         model_available_ = false;
         return false;
     }
 }
 
-// Start persistent Python ML server
+// start persistent Python ML server
 bool MLHashInterface::start_ml_server() {
     int stdin_pipe[2];
     int stdout_pipe[2];
     int stderr_pipe[2];
     
+    // create pipes for communication with Python process
     if (pipe(stdin_pipe) < 0 || pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
-        LOG_ERROR("Failed to create pipes for ML server");
+        cerr << "ERROR: Failed to create pipes for ML server" << endl;
         return false;
     }
     
+    // fork process to run Python ML server
     python_pid_ = fork();
-    
     if (python_pid_ < 0) {
-        LOG_ERROR("Failed to fork ML server process");
+        cerr << "ERROR: Failed to fork ML server process" << endl;
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stderr_pipe[0]); close(stderr_pipe[1]);
         return false;
     }
-    
     if (python_pid_ == 0) {
-        // Child process: run Python ML server
+        // child process: run Python ML server
         close(stdin_pipe[1]);   // Close write end of stdin
         close(stdout_pipe[0]);  // Close read end of stdout
         close(stderr_pipe[0]);  // Close read end of stderr
@@ -96,7 +93,7 @@ bool MLHashInterface::start_ml_server() {
         _exit(1);  // If exec fails
     }
     
-    // Parent process: keep pipes open
+    // parent process: keep pipes open
     close(stdin_pipe[0]);   // Close read end of stdin
     close(stdout_pipe[1]);  // Close write end of stdout
     close(stderr_pipe[1]);  // Close write end of stderr
@@ -106,12 +103,12 @@ bool MLHashInterface::start_ml_server() {
     python_stderr_ = fdopen(stderr_pipe[0], "r");
     
     if (!python_stdin_ || !python_stdout_) {
-        LOG_ERROR("Failed to open file streams for ML server");
+        cerr << "ERROR: Failed to open file streams for ML server" << endl;
         stop_ml_server();
         return false;
     }
     
-    // Wait for READY signal from Python
+    // wait for READY signal from Python
     char buffer[128];
     if (fgets(buffer, sizeof(buffer), python_stdout_)) {
         string ready_msg(buffer);
@@ -120,12 +117,12 @@ bool MLHashInterface::start_ml_server() {
         }
     }
     
-    LOG_ERROR("ML server failed to send READY signal");
+    cerr << "ERROR: ML server failed to send READY signal" << endl;
     stop_ml_server();
     return false;
 }
 
-// Stop persistent Python ML server
+// stop persistent Python ML server
 void MLHashInterface::stop_ml_server() {
     if (python_stdin_) {
         fprintf(python_stdin_, "QUIT\n");
@@ -148,10 +145,10 @@ void MLHashInterface::stop_ml_server() {
         int status;
         waitpid(python_pid_, &status, WNOHANG);
         
-        // Give process time to exit gracefully
+        // give process time to exit gracefully
         usleep(10000);  // 10ms
         
-        // Force kill if still running
+        // force kill if still running
         if (kill(python_pid_, 0) == 0) {
             kill(python_pid_, SIGTERM);
             usleep(10000);
@@ -165,7 +162,7 @@ void MLHashInterface::stop_ml_server() {
     }
 }
 
-// Extract features from CNF
+// extract features from CNF
 CNFFeatures MLHashInterface::extract_features(const CNF& cnf) {
     CNFFeatures features;
     
@@ -204,7 +201,7 @@ CNFFeatures MLHashInterface::extract_features(const CNF& cnf) {
     return features;
 }
 
-// Predict optimal hash configuration
+// predict optimal hash configuration
 HashConfig MLHashInterface::predict_hash_config(const CNF& cnf, uint32_t num_hashes) {
     HashConfig config;
     config.num_hashes = num_hashes;
@@ -231,37 +228,31 @@ HashConfig MLHashInterface::predict_hash_config(const CNF& cnf, uint32_t num_has
     return config;
 }
 
-// Generate ML-enhanced XOR constraints
-vector<XorConstraint> MLHashInterface::generate_ml_hashes(
-    const CNF& cnf,
-    uint32_t num_hashes) {
-    
+// generate ML-enhanced XOR constraints
+vector<XorConstraint> MLHashInterface::generate_ml_hashes(const CNF& cnf, uint32_t num_hashes) {
     if (!model_available_) {
-        LOG_INFO("Using heuristic-based XOR generation (ML model not available)");
-        // Use heuristics based on variable importance even without trained model
-        // This provides better consistency than random generation
+        // fallback to heuristic XOR generation if ML model is not available
         return generate_heuristic_hashes(cnf, num_hashes);
     }
     
-    LOG_INFO("Using ML model for XOR generation");
     // get variable importance scores from ML model
     vector<double> importance = predict_variable_importance(cnf);
     
-    // Get recommended sparsity for proper constraint density
+    // get recommended sparsity for proper constraint density
     double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
     
     // generate XOR constraints with biased sampling based on importance
     vector<XorConstraint> constraints;
     constraints.reserve(num_hashes);
     
-    // For each hash, sample variables with probability = sparsity * importance_weight
+    // for each hash, sample variables with probability = sparsity * importance_weight
     for (uint32_t i = 0; i < num_hashes; i++) {
         XorConstraint constraint;
         
-        // Sample variables based on importance-weighted probability
+        // sample variables based on importance-weighted probability
         for (uint32_t var = 1; var <= cnf.num_variables(); var++) {
             double importance_score = var - 1 < importance.size() ? importance[var - 1] : 0.5;
-            // Normalize importance to average 1.0, then multiply by base sparsity
+            // normalize importance to average 1.0, then multiply by base sparsity
             double probability = sparsity * (importance_score / 0.5);
             
             if (uniform_dist_(rng_) < probability) {
@@ -282,12 +273,12 @@ vector<XorConstraint> MLHashInterface::generate_ml_hashes(
     return constraints;
 }
 
-// Predict variable importance scores for XOR generation
+// predict variable importance scores for XOR generation
 vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
     uint32_t num_vars = cnf.num_variables();
     
     if (!model_available_ || !python_stdin_ || !python_stdout_) {
-        // Fallback to heuristics if ML not available
+        // fallback to heuristics if ML not available
         const auto& occurrences = cnf.get_variable_occurrences();
         vector<double> importance(num_vars, 0.5);
         
@@ -309,23 +300,24 @@ vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
         return importance;
     }
     
-    // Use ML model via persistent Python server
+    // use ML model via persistent Python server
     CNFFeatures features = extract_features(cnf);
     
-    // Add small Gaussian noise to continuous features for trial-to-trial variation
-    // This ensures different trials produce different ML predictions and counts
-    // NOTE: Do NOT add noise to num_variables/num_clauses as these must match actual values
+    // add small Gaussian noise to continuous features for trial-to-trial variation (model is deterministic with default parameters)
+    // otherwise we will get 0 variance between runs with the same formula
     double noisy_avg_clause = max(1.0, features.avg_clause_size + noise_dist_(rng_) * features.avg_clause_size);
     double noisy_ratio = max(0.01, features.variable_clause_ratio + noise_dist_(rng_) * features.variable_clause_ratio);
     
-    // Send request to Python server with original counts but noisy continuous features
-    fprintf(python_stdin_, "%u %u %f %f", 
-            features.num_variables,  // Keep exact
+    // send request to Python server with original counts but noisy continuous features
+    fprintf(
+        python_stdin_, "%u %u %f %f", 
+            features.num_variables,   // Keep exact
             features.num_clauses,     // Keep exact
-            noisy_avg_clause,        // Add noise
-            noisy_ratio);            // Add noise
+            noisy_avg_clause,         // Add noise
+            noisy_ratio               // Add noise
+    );
     
-    // Send variable occurrences with small noise
+    // send variable occurrences with small noise
     for (uint32_t occ : features.variable_occurrences) {
         double noisy_occ = max(0.0, occ + noise_dist_(rng_) * sqrt(static_cast<double>(occ + 1)));
         fprintf(python_stdin_, " %u", static_cast<uint32_t>(noisy_occ));
@@ -333,7 +325,7 @@ vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
     fprintf(python_stdin_, "\n");
     fflush(python_stdin_);
     
-    // Read importance scores from Python server
+    // read importance scores from Python server
     vector<double> importance;
     importance.reserve(num_vars);
     
@@ -347,7 +339,7 @@ vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
         }
         
         if (line == "ERROR") {
-            LOG_ERROR("ML server returned error");
+            std::cerr << "ERROR: ML server returned error" << std::endl;
             break;
         }
         
@@ -355,14 +347,14 @@ vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
             double score = stod(line);
             importance.push_back(score);
         } catch (...) {
-            // Ignore parse errors
+            // ignore parse errors
         }
     }
     
-    // Validate we got the right number of scores
+    // check if we got the right number of scores
     if (importance.size() != num_vars) {
-        LOG_WARNING("ML server returned ", importance.size(), " scores, expected ", num_vars, ". Using fallback.");
-        // Fallback to heuristics
+        std::cerr << "WARNING: ML server returned " << importance.size() << " scores, expected " << num_vars << ". Using fallback." << std::endl;
+        // fallback to heuristics if not
         const auto& occurrences = cnf.get_variable_occurrences();
         importance.clear();
         importance.resize(num_vars, 0.5);
@@ -386,14 +378,14 @@ vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
     return importance;
 }
 
-// Call Python ML model to get predictions based on features
+// call ML model to get predictions based on features
 vector<double> MLHashInterface::call_python_predictor(const CNFFeatures& features) {
     // write features to temporary file
     string temp_file = "/tmp/cnf_features_" + to_string(getpid()) + ".txt";
     ofstream out(temp_file);
     
     if (!out.is_open()) {
-        LOG_ERROR("Failed to create temporary feature file");
+        std::cerr << "ERROR: Failed to create temporary feature file" << std::endl;
         return {};
     }
     
@@ -419,7 +411,7 @@ vector<double> MLHashInterface::call_python_predictor(const CNFFeatures& feature
     FILE* pipe = popen(cmd.c_str(), "r");
     
     if (!pipe) {
-        LOG_ERROR("Failed to execute Python predictor");
+        std::cerr << "ERROR: Failed to execute Python predictor" << std::endl;
         remove(temp_file.c_str());
         return {};
     }
@@ -442,17 +434,12 @@ vector<double> MLHashInterface::call_python_predictor(const CNFFeatures& feature
     return predictions;
 }
 
-// Generate heuristic-based XOR constraints using variable occurrence statistics
-vector<XorConstraint> MLHashInterface::generate_heuristic_hashes(
-    const CNF& cnf,
-    uint32_t num_hashes) {
-    
-    // Use a MORE DETERMINISTIC approach based on variable occurrences
-    // This provides more consistent results across different seeds (lower variance)
+// generate heuristic-based XOR constraints using variable occurrences (more likely to include high-occurrence variables)
+vector<XorConstraint> MLHashInterface::generate_heuristic_hashes(const CNF& cnf, uint32_t num_hashes) {
     const auto& occurrences = cnf.get_variable_occurrences();
     uint32_t num_vars = cnf.num_variables();
     
-    // Sort variables by occurrence frequency for deterministic selection
+    // sort variables by occurrence
     vector<pair<uint32_t, uint32_t>> var_freq;
     for (uint32_t var = 1; var <= num_vars; var++) {
         uint32_t occ = var < occurrences.size() ? occurrences[var] : 0;
@@ -460,25 +447,22 @@ vector<XorConstraint> MLHashInterface::generate_heuristic_hashes(
     }
     sort(var_freq.begin(), var_freq.end(), greater<pair<uint32_t, uint32_t>>());
     
-    // Generate XOR constraints with DETERMINISTIC selection
-    // Select top variables by frequency with minimal randomness
+    // select top variables by frequency
     vector<XorConstraint> constraints;
     constraints.reserve(num_hashes);
     
-    double target_sparsity = 0.3;  // Target 30% of variables per constraint
+    double target_sparsity = 0.3;  // target 30% of variables per constraint
     uint32_t target_vars = max(1u, static_cast<uint32_t>(num_vars * target_sparsity));
     
     for (uint32_t i = 0; i < num_hashes; i++) {
         XorConstraint constraint;
         
-        // Deterministically select variables based on hash index and frequency
-        // Use cycling through high-frequency variables
         for (uint32_t j = 0; j < target_vars && j < num_vars; j++) {
             uint32_t idx = (i * target_vars + j) % num_vars;
             constraint.variables.push_back(var_freq[idx].second);
         }
         
-        // RHS based on hash index (deterministic)
+        // RHS based on hash index
         constraint.rhs = (i % 2) == 0;
         constraints.push_back(constraint);
     }

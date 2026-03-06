@@ -6,7 +6,7 @@
 using namespace std;
 namespace sharpsat {
 
-// Parses a CNF file and returns a CNF object
+// parse a CNF file and returns a CNF object
 unique_ptr<CNF> CNFParser::parse_file(const string& filename) {
     // ifstream is used to read the file content
     ifstream file(filename);
@@ -15,13 +15,13 @@ unique_ptr<CNF> CNFParser::parse_file(const string& filename) {
         return nullptr;
     }
     
-    // read entire file content into a stringstream
+    // read entire file content into a buffer and parse as string
     stringstream buffer;
     buffer << file.rdbuf();
     return parse_string(buffer.str());
 }
 
-// Parses CNF content from a string and returns a CNF object
+// parse CNF content from a string and returns a CNF object
 unique_ptr<CNF> CNFParser::parse_string(const string& content) {
     // create CNF and parse content line by line
     auto cnf = make_unique<CNF>();
@@ -65,7 +65,7 @@ unique_ptr<CNF> CNFParser::parse_string(const string& content) {
     return cnf;
 }
 
-// Helper function to parse the header line of a CNF file
+// helper function to parse the header line of a CNF file
 bool CNFParser::parse_header_line(const string& line, uint32_t& num_vars, uint32_t& num_clauses) {
     istringstream iss(line);
     string p, cnf_str;
@@ -76,7 +76,7 @@ bool CNFParser::parse_header_line(const string& line, uint32_t& num_vars, uint32
     return (p == "p" && cnf_str == "cnf" && num_vars > 0 && num_clauses > 0);
 }
 
-// Helper function to parse a clause line of a CNF file
+// helper function to parse a clause line of a CNF file
 bool CNFParser::parse_clause_line(const string& line, vector<Literal>& literals) {
     istringstream iss(line);
     int lit;

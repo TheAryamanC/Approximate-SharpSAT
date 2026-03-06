@@ -1,8 +1,5 @@
-#include "utils/logger.h"
 #include <iostream>
 #include <exception>
-
-using namespace sharpsat;
 
 // Forward declarations of test runners
 void run_cnf_structure_tests();
@@ -14,10 +11,6 @@ void run_utils_tests();
 void run_approximate_counter_tests();
 
 int main() {
-    // Disable verbose logging during tests
-    Logger::instance().set_verbose(false);
-    Logger::instance().set_level(LogLevel::ERROR);  // Only show errors
-    
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "   SharpSAT Comprehensive Test Suite\n";
