@@ -3,3 +3,4 @@ pycache/
 *.pyc
 bin/
 build/
+model.pkl

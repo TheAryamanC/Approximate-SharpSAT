@@ -1,7 +1,7 @@
 # Makefile for SharpSAT
 CXX = g++
 NVCC = nvcc
-NVCC_HOST_COMPILER = g++-10
+NVCC_HOST_COMPILER = g++
 
 # Directories
 SRC_DIR = src

@@ -15,8 +15,10 @@ namespace sharpsat {
 // Constructor
 ApproximateCounter::ApproximateCounter(const CounterConfig& config) : config_(config) {
     hash_generator_ = make_unique<XorHashGenerator>(config.seed);
-    ml_interface_ = make_unique<MLHashInterface>("src/ml_model/model.pkl");
-    ml_interface_->set_seed(config.seed);
+    if (config.use_ml_hashes) {
+        ml_interface_ = make_unique<MLHashInterface>("src/ml_model/model.pkl");
+        ml_interface_->set_seed(config.seed);
+    }
     bool use_gpu = sharpsat::cuda::is_cuda_available();
     sat_solver_ = make_unique<SATSolver>(config.timeout_seconds, use_gpu);
 }
