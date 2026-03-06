@@ -47,9 +47,7 @@ run: $(TARGET)
 	./$(TARGET) --help
 
 help:
-	@echo "Makefile"
-	@echo "================="
-	@echo "Targets:"
+	@echo "Makefile commands:"
 	@echo "  all      - Build approx_counter executable (default)"
 	@echo "  clean    - Remove all build artifacts"
 	@echo "  run      - Build and show help message"

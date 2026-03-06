@@ -76,7 +76,7 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     uint32_t num_iterations = config_.num_trials;
     uint32_t sat_count = 0;
     
-    // Run iterations sequentially (CUDA provides parallelism on GPU)
+    // run all iterations
     for (uint32_t iter = 0; iter < num_iterations; iter++) {
         // generate XOR constraints depending on configuration
         uint32_t iter_seed = config_.seed + iter;
