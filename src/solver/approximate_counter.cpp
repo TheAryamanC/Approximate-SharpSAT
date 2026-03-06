@@ -5,10 +5,6 @@
 #include <algorithm>
 #include <iostream>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
 using namespace std;
 namespace sharpsat {
 
@@ -56,6 +52,14 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
         return result;
     }
     
+    // Initialize CUDA context BEFORE any parallel execution to avoid race conditions
+    if (config_.use_cuda) {
+        if (!sharpsat::cuda::initialize_cuda_context(0)) {
+            cerr << "Warning: Failed to initialize CUDA, falling back to CPU" << endl;
+            config_.use_cuda = false;
+        }
+    }
+    
     // find hash level (number of XOR constraints to apply)
     uint32_t hash_level = find_hash_level(cnf);
     
@@ -70,33 +74,22 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     
     // run multiple iterations and get SAT count
     uint32_t num_iterations = config_.num_trials;
-    
-#ifdef _OPENMP
-    int num_threads = config_.use_cuda ? omp_get_max_threads() : 1;
-    omp_set_num_threads(num_threads);
-#endif
-    
     uint32_t sat_count = 0;
     
-    // parallelize iterations
-#ifdef _OPENMP
-    #pragma omp parallel for reduction(+:sat_count) if(config_.use_cuda)
-#endif
+    // Run iterations sequentially (CUDA provides parallelism on GPU)
     for (uint32_t iter = 0; iter < num_iterations; iter++) {
         // generate XOR constraints depending on configuration
-        // each thread needs its own hash generator to avoid race conditions
-        uint32_t thread_seed = config_.seed + iter;
-        XorHashGenerator thread_hash_gen(thread_seed);
+        uint32_t iter_seed = config_.seed + iter;
+        XorHashGenerator iter_hash_gen(iter_seed);
         
         vector<XorConstraint> xors;
         if (config_.use_ml_hashes) {
-            // need thread-local instance of ML interface
-            MLHashInterface thread_ml("src/ml_model/model.pkl");
-            thread_ml.set_seed(thread_seed);
-            xors = thread_ml.generate_ml_hashes(cnf, hash_level);
+            MLHashInterface iter_ml("src/ml_model/model.pkl");
+            iter_ml.set_seed(iter_seed);
+            xors = iter_ml.generate_ml_hashes(cnf, hash_level);
         } else {
             double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
-            xors = thread_hash_gen.generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
+            xors = iter_hash_gen.generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
         }
         
         // check satisfiability with XOR constraints

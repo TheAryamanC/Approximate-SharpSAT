@@ -23,6 +23,9 @@ void print_gpu_info(int device_id = 0);
 // Check if CUDA is available
 bool is_cuda_available();
 
+// Initialize CUDA context (must be called before multi-threaded CUDA usage)
+bool initialize_cuda_context(int device_id = 0);
+
 // Gaussian elimination on GPU
 bool gaussian_elimination_gpu(
     const std::vector<uint32_t>& xor_vars,

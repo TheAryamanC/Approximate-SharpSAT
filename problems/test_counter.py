@@ -26,7 +26,7 @@ class BenchmarkRunner:
             
         try:
             start = time.time()
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)  # 30 second timeout per trial
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)  # 30 second timeout per trial
             wall_time = time.time() - start
             
             if result.returncode != 0:
@@ -96,7 +96,7 @@ class BenchmarkRunner:
         iterations_list = []
         
         for i in range(num_trials):
-            print(f"Trial {i+1}/{num_trials}...", end='', flush=True)
+            print(f"Trial {i+1}/{num_trials}: ", end='', flush=True)
             # use different seed for each trial to observe variance
             trial_seed = 42 + i
             result = self.run_single_trial(cnf_file, seed=trial_seed, **kwargs)
@@ -114,6 +114,7 @@ class BenchmarkRunner:
                     iterations_list.append(result['iterations'])
             else:
                 print("trial failed or did not report count")
+                print(f"  Result: {result}")
                 
         if not results:
             return None
@@ -313,15 +314,15 @@ class BenchmarkRunner:
 
 def main():
     # Find executable
-    bin_dir = Path(__file__).parent.parent / "bin"
-    executable = bin_dir / "sharp_sat"
+    bin_dir = Path(__file__).resolve().parent.parent / "bin"
+    executable = bin_dir / "approx_counter"
     
     if not executable.exists():
         print(f"Error: Executable not found at {executable}")
         sys.exit(1)
         
     # Find CNF files
-    cnf_dir = Path(__file__).parent / "cnfs"
+    cnf_dir = Path(__file__).resolve().parent / "cnfs"
     cnf_files = sorted(cnf_dir.glob("*.cnf"))
     
     if not cnf_files:
@@ -329,7 +330,7 @@ def main():
         sys.exit(1)
     
     # Use ALL CNF files in the directory
-    print("SharpSAT Comprehensive Benchmark")
+    print("Comprehensive Benchmark")
     print("="*80)
     print(f"Executable: {executable}")
     print(f"CNF files: {len(cnf_files)}")

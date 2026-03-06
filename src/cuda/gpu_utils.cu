@@ -72,6 +72,25 @@ bool is_cuda_available() {
     return device_count > 0;
 }
 
+// Initialize CUDA context (must be called before any CUDA operations, especially in multi-threaded context)
+bool initialize_cuda_context(int device_id) {
+    try {
+        // Explicitly set the device
+        CUDA_CHECK(cudaSetDevice(device_id));
+        
+        // Force context initialization by doing a simple operation
+        CUDA_CHECK(cudaFree(0));
+        
+        // Synchronize to ensure context is fully initialized
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        return true;
+    } catch (const CUDAException& e) {
+        cerr << "Failed to initialize CUDA context: " << e.what() << endl;
+        return false;
+    }
+}
+
 // get optimal block size for kernel launches
 int get_optimal_block_size(int num_elements) {
     if (num_elements <= 0) return 32;
