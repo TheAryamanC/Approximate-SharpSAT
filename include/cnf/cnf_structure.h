@@ -7,7 +7,7 @@
 #include <cstddef>
 
 /// <summary>
-/// A variable is represented as a positive integer index (>1)
+/// A variable is represented as a positive integer index (>=1)
 /// A literal is a variable index with a sign (positive or negative)
 /// A clause is a disjunction (OR) of literals
 /// A CNF formula is a conjunction (AND) of clauses

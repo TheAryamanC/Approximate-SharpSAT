@@ -15,7 +15,7 @@ namespace sharpsat {
 // Constructors
 MLHashInterface::MLHashInterface() 
     : model_available_(false), fallback_generator_(make_unique<XorHashGenerator>()),
-      rng_(42), uniform_dist_(0.0, 1.0), bool_dist_(0, 1),
+      rng_(42), uniform_dist_(0.0, 1.0), bool_dist_(0, 1), noise_dist_(0.0, 0.05),
       python_stdin_(nullptr), python_stdout_(nullptr), python_stderr_(nullptr), python_pid_(-1) {
     // Heuristic-based generation is always available
 }
@@ -23,7 +23,7 @@ MLHashInterface::MLHashInterface()
 MLHashInterface::MLHashInterface(const string& model_path)
     : model_path_(model_path), model_available_(false),
       fallback_generator_(make_unique<XorHashGenerator>()),
-      rng_(42), uniform_dist_(0.0, 1.0), bool_dist_(0, 1),
+      rng_(42), uniform_dist_(0.0, 1.0), bool_dist_(0, 1), noise_dist_(0.0, 0.05),
       python_stdin_(nullptr), python_stdout_(nullptr), python_stderr_(nullptr), python_pid_(-1) {
     initialize(model_path);
 }
@@ -312,16 +312,23 @@ vector<double> MLHashInterface::predict_variable_importance(const CNF& cnf) {
     // Use ML model via persistent Python server
     CNFFeatures features = extract_features(cnf);
     
-    // Send request to Python server
-    fprintf(python_stdin_, "%u %u %f %f", 
-            features.num_variables, 
-            features.num_clauses,
-            features.avg_clause_size,
-            features.variable_clause_ratio);
+    // Add small Gaussian noise to continuous features for trial-to-trial variation
+    // This ensures different trials produce different ML predictions and counts
+    // NOTE: Do NOT add noise to num_variables/num_clauses as these must match actual values
+    double noisy_avg_clause = max(1.0, features.avg_clause_size + noise_dist_(rng_) * features.avg_clause_size);
+    double noisy_ratio = max(0.01, features.variable_clause_ratio + noise_dist_(rng_) * features.variable_clause_ratio);
     
-    // Send variable occurrences
+    // Send request to Python server with original counts but noisy continuous features
+    fprintf(python_stdin_, "%u %u %f %f", 
+            features.num_variables,  // Keep exact
+            features.num_clauses,     // Keep exact
+            noisy_avg_clause,        // Add noise
+            noisy_ratio);            // Add noise
+    
+    // Send variable occurrences with small noise
     for (uint32_t occ : features.variable_occurrences) {
-        fprintf(python_stdin_, " %u", occ);
+        double noisy_occ = max(0.0, occ + noise_dist_(rng_) * sqrt(static_cast<double>(occ + 1)));
+        fprintf(python_stdin_, " %u", static_cast<uint32_t>(noisy_occ));
     }
     fprintf(python_stdin_, "\n");
     fflush(python_stdin_);

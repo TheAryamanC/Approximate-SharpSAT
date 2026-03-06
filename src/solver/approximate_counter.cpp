@@ -15,12 +15,16 @@ ApproximateCounter::ApproximateCounter(const CounterConfig& config)
     hash_generator_ = make_unique<XorHashGenerator>(config.seed);
     // Initialize ML interface with model path
     ml_interface_ = make_unique<MLHashInterface>("src/ml_model/model.pkl");
+    // Set seed for randomization across trials
+    ml_interface_->set_seed(config.seed);
     // Use GPU if available
     bool use_gpu = sharpsat::cuda::is_cuda_available();
-    sat_solver_ = make_unique<SATSolver>(10000, use_gpu);  // max 10k decisions for faster benchmarks
+    sat_solver_ = make_unique<SATSolver>(config.timeout_seconds, use_gpu);
     if (use_gpu) {
         LOG_INFO("SAT solver initialized with GPU acceleration");
     }
+    LOG_INFO("SAT solver timeout: ", config.timeout_seconds, " seconds");
+    LOG_INFO("Number of trials: ", config.num_trials);
 }
 
 // Main counting interface
@@ -62,13 +66,13 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
         return result;
     }
     
-    // find pivot threshold
-    LOG_INFO("Finding pivot threshold...");
-    uint32_t pivot = find_pivot_threshold(cnf);
-    LOG_INFO("Pivot threshold: ", pivot);
+    // find hash level (number of XOR constraints to apply)
+    LOG_INFO("Finding hash level...");
+    uint32_t hash_level = find_hash_level(cnf);
+    LOG_INFO("Hash level: ", hash_level);
     
-    // if pivot is 0, formula is UNSAT with high probability
-    if (pivot == 0) {
+    // if hash level is 0, formula is UNSAT with high probability
+    if (hash_level == 0) {
         result.count = 0.0;
         result.lower_bound = 0.0;
         result.upper_bound = 0.0;
@@ -77,11 +81,9 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     }
     
     // run multiple iterations and get SAT count
-    // number of iterations based on confidence parameters
-    // formula:
-    uint32_t num_iterations = static_cast<uint32_t>(ceil(3.0 * log(3.0 / config_.delta) / (config_.epsilon * config_.epsilon)));
-    num_iterations = min(num_iterations, config_.max_iterations);
-    LOG_INFO("Running ", num_iterations, " iterations at pivot threshold");
+    // Use configured number of trials
+    uint32_t num_iterations = config_.num_trials;
+    LOG_INFO("Running ", num_iterations, " iterations at hash level ", hash_level);
     
     uint32_t sat_count = 0;
     for (uint32_t iter = 0; iter < num_iterations; iter++) {
@@ -89,10 +91,10 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
         vector<XorConstraint> xors;
         if (config_.use_ml_hashes) {
             // ML interface now includes heuristic-based generation
-            xors = ml_interface_->generate_ml_hashes(cnf, pivot);
+            xors = ml_interface_->generate_ml_hashes(cnf, hash_level);
         } else {
             double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
-            xors = hash_generator_->generate_random_hashes(cnf.num_variables(), pivot, sparsity);
+            xors = hash_generator_->generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
         }
         
         // check satisfiability with XOR constraints
@@ -111,20 +113,33 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     
     // estimate count based on SAT probability
     double sat_prob = static_cast<double>(sat_count) / num_iterations;
+    LOG_INFO("SAT outcomes: ", sat_count, " / ", num_iterations, " (", sat_prob * 100, "%)");
     
     if (sat_prob > 0.0) {
-        // expected cell size is 2^(n - pivot)
-        double cell_size = pow(2.0, cnf.num_variables() - pivot);
+        // ApproxMC estimation formula:
+        // hash_level k partitions solution space into ~2^k cells
+        // Each cell has expected size 2^(n-k) where n = num_variables
+        // cell_threshold is the target number of solutions per cell: ceil(4.03 * (1 + 1/epsilon)^2)
+        // 
+        // Total count estimation combines:
+        // - Cell size: 2^(n-k)
+        // - SAT probability adjustment: (num_iterations / sat_count)
+        // - Target threshold: cell_threshold
+        // 
+        // Formula: count = 2^(n-k) * (iterations / sat_count) * cell_threshold
         
-        // estimated count
-        result.count = cell_size * config_.pivot_threshold;
+        double cell_threshold = config_.get_cell_threshold();
+        double cell_size = pow(2.0, cnf.num_variables() - hash_level);
+        
+        // Median estimator: adjust count based on observed SAT probability
+        result.count = cell_size * (static_cast<double>(num_iterations) / sat_count) * cell_threshold;
         
         // compute bounds
-        compute_bounds(pivot, cnf.num_variables(), result);
+        compute_bounds(hash_level, cnf.num_variables(), result);
         result.successful = true;
     } else {
         // all iterations were UNSAT - count is very small
-        result.count = pow(2.0, cnf.num_variables() - pivot - 1);
+        result.count = pow(2.0, cnf.num_variables() - hash_level - 1);
         result.lower_bound = 0.0;
         result.upper_bound = result.count * 2.0;
         result.successful = true;
@@ -133,19 +148,21 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     return result;
 }
 
-// Binary search for pivot threshold
-uint32_t ApproximateCounter::find_pivot_threshold(const CNF& cnf) {
+// Binary search for optimal hash level (number of XOR constraints)
+// Goal: Find k such that formula with k XOR constraints is SAT with reasonable probability
+// This helps partition solution space optimally for counting
+uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
     uint32_t left = 0;
     uint32_t right = cnf.num_variables();
-    uint32_t pivot = 0;
+    uint32_t hash_level = 0;
     
     double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
     
-    // we want to find the largest pivot such that formula with pivot XOR constraints is SAT with high probability
+    // Binary search to find the largest hash level where formula is SAT with high probability
     while (left <= right && right <= cnf.num_variables()) {
         uint32_t mid = (left + right) / 2;
         
-        // run a few samples to estimate SAT probability at this pivot
+        // run a few samples to estimate SAT probability at this hash level
         uint32_t num_samples = 3;  // reduced from 10 for faster benchmarks
         uint32_t sat_samples = 0;
         
@@ -167,24 +184,24 @@ uint32_t ApproximateCounter::find_pivot_threshold(const CNF& cnf) {
         
         // estimate SAT probability
         double sat_prob = static_cast<double>(sat_samples) / num_samples;
-        LOG_DEBUG("Threshold ", mid, ": SAT probability = ", sat_prob);
+        LOG_DEBUG("Hash level ", mid, ": SAT probability = ", sat_prob);
         
-        // We want sat_prob close to pivot_threshold / num_samples (range)
+        // We want sat_prob in a reasonable range (not too high, not too low)
         if (sat_prob > 0.8) {
-            // too many SAT, increase threshold
-            pivot = mid;
+            // too many SAT, increase hash level (add more XOR constraints)
+            hash_level = mid;
             left = mid + 1;
         } else if (sat_prob < 0.3) {
-            // too few SAT, decrease threshold
+            // too few SAT, decrease hash level (remove XOR constraints)
             if (mid == 0) break;
             right = mid - 1;
         } else {
-            pivot = mid;
+            hash_level = mid;
             break;
         }
     }
     
-    return pivot;
+    return hash_level;
 }
 
 // Check satisfiability with XOR constraints
@@ -308,7 +325,7 @@ unordered_map<Variable, bool> ApproximateCounter::apply_xor_constraints(const ve
     return assignment;
 }
 
-void ApproximateCounter::compute_bounds(double threshold, uint32_t num_variables, CountResult& result) {
+void ApproximateCounter::compute_bounds(uint32_t hash_level, uint32_t num_variables, CountResult& result) {
     // compute confidence bounds based on epsilon and delta
     double factor = exp(config_.epsilon);
     

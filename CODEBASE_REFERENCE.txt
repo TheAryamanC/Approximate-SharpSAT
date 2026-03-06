@@ -17,7 +17,7 @@ PURPOSE: Application entry point and command-line interface
 CONNECTS TO: Initializes and runs the approximate counter
 
 --------------------------------------------------------------------------------
-STRUCT: AppConfig (lines 12-22)
+STRUCT: AppConfig (lines 13-28)
 --------------------------------------------------------------------------------
 WHAT: Configuration structure holding application settings
 WHY: Centralizes all user-configurable parameters
@@ -30,8 +30,31 @@ FIELDS:
   - use_ml: Enable ML-enhanced hash generation
   - use_cuda: Enable GPU acceleration
   - seed: Random seed for reproducibility
+  - timeout_seconds: Timeout for each SAT solver call (default 60.0)
+  - num_trials: Number of counting iterations (0 = calculate from epsilon/delta)
   - verbose: Enable debug logging
   - show_gpu_info: Display GPU capabilities
+  - epsilon_specified: Track if user specified epsilon
+  - delta_specified: Track if user specified delta
+  - trials_specified: Track if user specified trials
+
+--------------------------------------------------------------------------------
+FUNCTION: calculate_trials(double epsilon, double delta)
+--------------------------------------------------------------------------------
+WHAT: Calculate number of trials from epsilon and delta using ApproxMC formula
+WHY: Determine how many iterations needed for desired accuracy
+CONNECTS TO: Called by parse_args when user doesn't specify --trials
+FORMULA: iterations = 3 × ln(3/δ) / ε²
+RETURNS: Number of trials (ceiled to integer)
+
+--------------------------------------------------------------------------------
+FUNCTION: calculate_epsilon(uint32_t trials, double delta = 0.2)
+--------------------------------------------------------------------------------
+WHAT: Back-calculate epsilon from trials (assuming delta=0.2)
+WHY: When user specifies --trials, compute corresponding epsilon
+CONNECTS TO: Called by parse_args when user specifies --trials
+FORMULA: ε = sqrt(3 × ln(3/δ) / trials)
+RETURNS: Calculated epsilon value
 
 --------------------------------------------------------------------------------
 FUNCTION: print_usage(const char* prog_name)
@@ -39,6 +62,10 @@ FUNCTION: print_usage(const char* prog_name)
 WHAT: Displays command-line usage instructions
 WHY: Helps users understand available options
 CONNECTS TO: Called when invalid arguments provided or --help requested
+
+NEW OPTIONS:
+  - --timeout <float>: Timeout in seconds per SAT call
+  - --trials <int>: Directly specify number of trials (mutually exclusive with --epsilon/--delta)
 
 --------------------------------------------------------------------------------
 FUNCTION: parse_args(int argc, char** argv, AppConfig& config)
@@ -50,7 +77,10 @@ RETURNS: true if parsing successful, false if help needed or error
 
 PARSING LOGIC:
   - First argument must be CNF file path
-  - Supports flags: --epsilon, --delta, --use-ml, --no-cuda, --seed, --verbose
+  - Supports flags: --epsilon, --delta, --trials, --timeout, --use-ml, --no-cuda, --seed, --verbose, --gpu-info
+  - Validates mutually exclusive options (--trials cannot be used with --epsilon/--delta)
+  - Calculates num_trials from epsilon/delta if not specified
+  - Back-calculates epsilon from trials if --trials specified
   - Returns false for --help or invalid arguments
 
 --------------------------------------------------------------------------------
@@ -399,6 +429,61 @@ pure_literal_elimination(cnf, assignment) → bool
   CONNECTS TO: Called by simplify() once before DPLL
   RETURNS: Always true (pure literal elimination can't cause conflicts)
 
+remove_subsumed_clauses(cnf)
+  WHAT: Remove clauses that are subsumed by other clauses
+  WHY: Simplification technique - reduces clause count
+  
+  WHAT IS SUBSUMPTION:
+    - Clause C1 subsumes C2 if C1 ⊆ C2
+    - Example: (x1 ∨ x2) subsumes (x1 ∨ x2 ∨ x3)
+    - Can remove C2 without changing satisfiability
+  
+  ALGORITHM:
+    1. Sort clauses by size
+    2. For each pair of clauses:
+       - Check if smaller clause subsumes larger
+       - If yes, mark larger for removal
+    3. Remove marked clauses
+  
+  CONNECTS TO: Can be called during preprocessing
+  NOTE: Expensive operation (O(clauses^2)), typically used only in preprocessing
+
+apply_partial_assignment(cnf, assignment)
+  WHAT: Apply partial variable assignment to CNF
+  WHY: Simplify formula based on known variable values
+  
+  ALGORITHM:
+    1. For each clause:
+       - Check if any literal satisfied → remove clause
+       - Remove falsified literals from clause
+    2. Remove satisfied clauses from formula
+  
+  CONNECTS TO: Called when XOR constraints provide partial assignments
+  NOTE: Similar to CNF::apply_assignment() but in CNFSimplifier
+
+check_triviality(cnf) → TrivialityCheck
+  WHAT: Check if CNF is trivially SAT or UNSAT
+  WHY: Quick check before expensive SAT solving
+  
+  RETURNS:
+    - TrivialityCheck::SAT if empty formula (no clauses)
+    - TrivialityCheck::UNSAT if empty clause exists
+    - TrivialityCheck::UNKNOWN otherwise
+  
+  CONNECTS TO: Can be used for early termination in SAT solver
+
+is_clause_satisfied(clause, assignment) → bool
+  WHAT: Check if clause is satisfied by partial assignment
+  WHY: Helper for checking formula satisfaction
+  
+  ALGORITHM:
+    - Check each literal in clause
+    - If any literal is true under assignment, return true
+    - Otherwise return false
+  
+  CONNECTS TO: Used internally by apply_partial_assignment()
+  RETURNS: true if clause satisfied, false otherwise
+
 find_unit_clauses(cnf) → vector<Literal>
   WHAT: Finds all unit clauses in formula
   WHY: Helper for unit_propagate()
@@ -442,15 +527,15 @@ SATSolver()
   WHAT: Default constructor
   WHY: Create solver with default settings
   CONNECTS TO: Can create and configure separately
-  DEFAULT VALUES: max_decisions=1000000, timeout=300s, use_gpu=false
+  DEFAULT VALUES: timeout=60.0s, use_gpu=false
 
-SATSolver(max_decisions)
-  WHAT: Constructor with decision limit
+SATSolver(timeout_seconds)
+  WHAT: Constructor with timeout
   WHY: Limit solving time for approximate counting
   CONNECTS TO: Approximate counting doesn't need exact solutions
 
-SATSolver(max_decisions, use_gpu)
-  WHAT: Constructor with decision limit and GPU flag
+SATSolver(timeout_seconds, use_gpu)
+  WHAT: Constructor with timeout and GPU flag
   WHY: Enable GPU acceleration when CUDA available
   CONNECTS TO: ApproximateCounter uses this constructor
   WHEN CALLED: ApproximateCounter constructor checks CUDA availability
@@ -619,11 +704,17 @@ FIELDS:
   - use_cuda: Enable CUDA acceleration (default true)
     WHY: Speed up on compatible hardware
   
-  - pivot_threshold: Threshold for SAT checks (default 9.0)
-    WHY: Used in pivot finding algorithm
+  - timeout_seconds: Timeout for each SAT solver call (default 60.0)
+    WHY: Prevent individual SAT checks from running too long
   
-  - max_iterations: Maximum iterations (default 10)
-    WHY: Limit running time
+  - num_trials: Number of counting iterations (default 10)
+    WHY: Controls accuracy - more trials = better estimate
+    NOTE: Can be calculated from epsilon/delta or set directly
+
+METHODS:
+  - get_cell_threshold(): Calculate cell threshold using ApproxMC formula
+    FORMULA: ceil(4.03 * (1 + 1/epsilon)^2)
+    WHY: Determines target number of solutions per cell for optimal counting
 
 --------------------------------------------------------------------------------
 STRUCT: CountResult
@@ -663,10 +754,12 @@ ApproximateCounter(config)
   INITIALIZATION:
     1. Store config
     2. Create XorHashGenerator with seed
-    3. Create MLHashInterface with model path "ml_model/model.pkl"
-    4. Check if CUDA available
-    5. Create SATSolver with max_decisions=10000 and GPU flag
-    6. Log if GPU acceleration enabled
+    3. Create MLHashInterface with model path "src/ml_model/model.pkl"
+    4. Set seed for ML interface randomization
+    5. Check if CUDA available
+    6. Create SATSolver with timeout_seconds and GPU flag
+    7. Log if GPU acceleration enabled
+    8. Log SAT solver timeout and number of trials
 
 PUBLIC METHODS:
 
@@ -715,71 +808,75 @@ approxmc(cnf) → CountResult
      - Empty formula (no clauses): count = 2^n (all assignments SAT)
      - Empty clause present: count = 0 (UNSAT)
   
-  2. FIND PIVOT THRESHOLD m:
-     Goal: Find largest m such that formula+XORs is SAT with good probability
+  2. FIND HASH LEVEL k:
+     Goal: Find largest k such that formula+XORs is SAT with good probability
      Why: We want cells to be non-empty but small
-     Method: Binary search (see find_pivot_threshold())
-     Typical range: m = 0 to n (number of variables)
+     Method: Binary search (see find_hash_level())
+     Typical range: k = 0 to n (number of variables)
   
   3. RUN MULTIPLE ITERATIONS:
-     Number of iterations = f(epsilon, delta): 3 * ln(3/delta) / epsilon^2
-     But capped at max_iterations (default 10)
+     Number of iterations = config.num_trials
+     Can be user-specified via --trials or calculated from epsilon/delta
+     Formula (if calculated): 3 * ln(3/delta) / epsilon^2
      
      For each iteration:
-       a. Generate m random XOR constraints
+       a. Generate k random XOR constraints (use ML if enabled)
        b. Check SAT with these constraints
        c. Count successful SAT checks
   
   4. ESTIMATE COUNT:
      sat_prob = (# SAT iterations) / (total iterations)
-     cell_size = 2^(n - m)   (each cell has this many possible assignments)
-     count = cell_size * pivot_threshold
+     cell_size = 2^(n - k)   (each cell has this many possible assignments)
+     cell_threshold = ceil(4.03 * (1 + 1/epsilon)^2)  [ApproxMC formula]
      
-     Intuition: If X% of random cells are SAT, total count ≈ X% * 2^n
+     Median estimator formula:
+     count = cell_size * (iterations / sat_count) * cell_threshold
+     
+     Intuition: Adjust by observed SAT probability and target threshold
   
   5. COMPUTE CONFIDENCE BOUNDS:
      Based on statistical analysis of ApproxMC algorithm
      Bounds depend on epsilon, delta parameters
   
   SPECIAL CASES:
-    - If pivot = 0: Formula likely UNSAT, return count = 0
-    - If all iterations UNSAT: count is very small, estimate 2^(n-m-1)
+    - If hash_level = 0: Formula likely UNSAT, return count = 0
+    - If all iterations UNSAT: count is very small, estimate 2^(n-k-1)
   
   RETURNS: CountResult with all metrics
 
-find_pivot_threshold(cnf) → uint32_t
-  WHAT: Binary search to find optimal XOR constraint count
+find_hash_level(cnf) → uint32_t
+  WHAT: Binary search to find optimal XOR constraint count (hash level)
   WHY: Need right number of constraints - too few: expensive SAT, too many: all UNSAT
   CONNECTS TO: Called by approxmc() once per counting run
   
-  GOAL: Find largest m such that CNF + m XOR constraints is SAT with probability 30-80%
+  GOAL: Find largest k such that CNF + k XOR constraints is SAT with probability 30-80%
   
   ALGORITHM:
     1. Initialize binary search: left=0, right=num_variables
     2. While left <= right:
        a. mid = (left + right) / 2
-       b. Generate m=mid XOR constraints
+       b. Generate k=mid XOR constraints (use ML if enabled)
        c. Run 3 SAT samples with different XOR constraint sets
        d. Compute SAT probability: (# SAT samples) / 3
-       e. If sat_prob > 0.8: too easy, increase m (left = mid+1)
-       f. If sat_prob < 0.3: too hard, decrease m (right = mid-1)
-       g. If 0.3 <= sat_prob <= 0.8: found good threshold, break
-    3. Return pivot m
+       e. If sat_prob > 0.8: too easy, increase k (left = mid+1)
+       f. If sat_prob < 0.3: too hard, decrease k (right = mid-1)
+       g. If 0.3 <= sat_prob <= 0.8: found good hash level, break
+    3. Return hash_level k
   
   WHY 30-80% RANGE:
     - Too high (>80%): Not partitioning enough, expensive SAT checks
     - Too low (<30%): Over-partitioning, few SAT samples, high variance
     - Sweet spot: Enough constraint to reduce search, enough SAT to estimate
   
-  OPTIMIZATION: Uses only 3 samples per threshold (vs. 10 in some implementations)
-    Why: Faster pivot finding, sufficient for good threshold estimate
+  OPTIMIZATION: Uses only 3 samples per level (reduced for faster benchmarks)
+    Why: Faster hash level finding, sufficient for good estimate
   
-  RETURNS: Pivot threshold m (number of XOR constraints)
+  RETURNS: Hash level k (number of XOR constraints)
 
 check_sat_with_xors(cnf, xors, assignment) → bool
   WHAT: Check if CNF with XOR constraints is satisfiable
   WHY: Core operation in ApproxMC - need to test constrained formula
-  CONNECTS TO: Called by approxmc() and find_pivot_threshold()
+  CONNECTS TO: Called by approxmc() and find_hash_level()
   
   ALGORITHM:
     1. Apply XOR constraints via Gaussian elimination → partial assignment
@@ -831,7 +928,7 @@ apply_xor_constraints(xors, num_variables) → unordered_map<Variable, bool>
   
   RETURNS: Partial assignment (some variables assigned, others free)
 
-compute_bounds(threshold, num_variables, result)
+compute_bounds(hash_level, num_variables, result)
   WHAT: Calculate confidence bounds on count estimate
   WHY: Communicate uncertainty to user
   CONNECTS TO: Called by approxmc() after computing count
@@ -850,7 +947,9 @@ PURPOSE: Implementation of ApproximateCounter
 
 FULL IMPLEMENTATION DETAILS:
   - approxmc() handles edge cases carefully (empty formula, UNSAT)
-  - find_pivot_threshold() uses adaptive binary search
+  - find_hash_level() uses adaptive binary search
+  - Uses config.num_trials for iteration count
+  - Uses get_cell_threshold() for ApproxMC formula
   - Logs progress for transparency
   - Integrates ML hashes if config.use_ml_hashes=true
 
@@ -863,6 +962,36 @@ PURPOSE: Generate random XOR constraints for universal hashing
 CONNECTS TO: Used by ApproximateCounter to partition solution space
 
 --------------------------------------------------------------------------------
+STRUCT: HashConfig
+--------------------------------------------------------------------------------
+WHAT: Configuration for XOR hash generation
+WHY: Encapsulate hash generation parameters
+CONNECTS TO: Used by ML and standard hash generators
+
+FIELDS:
+  - sparsity: Probability of variable appearing in XOR (default 0.5)
+  - num_hashes: Number of XOR constraints to generate (default 1)
+  - seed: Random seed (default 42)
+  - use_ml_predictor: Use ML model for hash generation (default false)
+
+--------------------------------------------------------------------------------
+STRUCT: Cell
+--------------------------------------------------------------------------------
+WHAT: Represents a cell in solution space partitioning
+WHY: Track XOR constraint groups and their threshold
+CONNECTS TO: Used conceptually in approximate counting
+
+FIELDS:
+  - xor_constraints: List of XOR constraints defining this cell
+  - threshold: Number of XOR constraints (hash level)
+
+METHODS:
+  - expected_size(num_variables): Calculate expected cell size
+    FORMULA: 2^(num_variables - threshold)
+    WHY: Each XOR constraint halves solution space on average
+    RETURNS: Expected number of solutions in this cell
+
+--------------------------------------------------------------------------------
 CLASS: XorHashGenerator
 --------------------------------------------------------------------------------
 WHAT: Generates random sparse XOR constraints
@@ -870,8 +999,9 @@ WHY: Universal hashing core to ApproxMC algorithm
 CONNECTS TO: ApproximateCounter creates instance, calls generate_random_hashes()
 
 PRIVATE FIELDS:
-  - rng_: Random number generator (std::mt19937_64)
-  - seed_: Random seed
+  - rng_: Random number generator (std::mt19937)
+  - uniform_dist_: Uniform distribution for sparsity
+  - bool_dist_: Uniform distribution for RHS generation
 
 CONSTRUCTOR:
 
@@ -927,6 +1057,11 @@ generate_single_hash(num_variables, sparsity) → XorConstraint
       x2 ⊕ x3 ⊕ x5 = 1
     (variables 2,3,5 included, 1,4 excluded)
 
+set_seed(seed)
+  WHAT: Set random seed for generator
+  WHY: Allow re-seeding for different random sequences
+  CONNECTS TO: Can be called to change seed after construction
+
 static get_recommended_sparsity(num_variables) → double
   WHAT: Compute good sparsity value for formula size
   WHY: Heuristic to balance speed vs. hashing quality
@@ -957,6 +1092,23 @@ PURPOSE: Interface to ML model for enhanced hash generation
 CONNECTS TO: Optional feature to improve XOR constraint quality
 
 --------------------------------------------------------------------------------
+STRUCT: CNFFeatures
+--------------------------------------------------------------------------------
+WHAT: Features extracted from CNF for ML model
+WHY: ML model needs structured input about formula characteristics
+CONNECTS TO: Used by MLHashInterface to predict good XOR constraints
+
+FIELDS:
+  - num_variables: Number of variables in formula
+  - num_clauses: Number of clauses in formula
+  - avg_clause_size: Average literals per clause
+  - variable_clause_ratio: Ratio of variables to clauses
+  - variable_occurrences: Count of how often each variable appears
+  - variable_balance: Ratio of positive/negative occurrences per variable
+  - max_occurrence: Maximum occurrence count of any variable
+  - min_occurrence: Minimum occurrence count of any variable
+
+--------------------------------------------------------------------------------
 CLASS: MLHashInterface
 --------------------------------------------------------------------------------
 WHAT: Wrapper for Python ML model that predicts good XOR constraints
@@ -964,42 +1116,97 @@ WHY: ML can learn better hashing schemes than pure random
 CONNECTS TO: ApproximateCounter creates instance, uses if config.use_ml_hashes=true
 
 PRIVATE FIELDS:
+  - model_available_: Whether model successfully loaded (renamed from model_loaded_)
   - model_path_: Path to trained ML model (pickle file)
-  - model_loaded_: Whether model successfully loaded
   - fallback_generator_: XorHashGenerator for when ML unavailable
+  - rng_: Random number generator for hash generation
+  - uniform_dist_: Uniform distribution
+  - bool_dist_: Boolean distribution
+  - noise_dist_: Normal distribution for adding randomization to features
+  - python_stdin_: Persistent Python ML server stdin
+  - python_stdout_: Persistent Python ML server stdout
+  - python_stderr_: Persistent Python ML server stderr
+  - python_pid_: Process ID of Python ML server
 
-CONSTRUCTOR:
+CONSTRUCTORS:
+
+MLHashInterface()
+  WHAT: Default constructor
+  WHY: Create interface without model
+  CONNECTS TO: Can initialize model later
 
 MLHashInterface(model_path)
   WHAT: Initialize interface and load ML model
   WHY: Set up for ML-enhanced generation
-  CONNECTS TO: ApproximateCounter constructs with "ml_model/model.pkl"
+  CONNECTS TO: ApproximateCounter constructs with "src/ml_model/model.pkl"
   
   INITIALIZATION:
     1. Store model path
-    2. Attempt to load Python model
-    3. If load fails: log warning, set model_loaded_=false
-    4. Create fallback_generator_ for when ML unavailable
+    2. Initialize RNG and distributions
+    3. Start persistent Python ML server
+    4. If server start fails: log warning, set model_available_=false
+    5. Create fallback_generator_ for when ML unavailable
 
 PUBLIC METHODS:
 
+initialize(model_path) → bool
+  WHAT: Initialize ML model from file path
+  WHY: Allow lazy initialization or re-initialization
+  CONNECTS TO: Can be called after default construction
+  RETURNS: true if successful, false otherwise
+
+is_available() → bool
+  WHAT: Check if ML model is available (renamed from is_model_loaded)
+  WHY: Know whether ML generation is active
+  CONNECTS TO: Can be used for diagnostics
+  RETURNS: true if model loaded and server running
+
+set_seed(seed)
+  WHAT: Set random seed for hash generation
+  WHY: Ensure different random XORs across trials even with ML
+  CONNECTS TO: ApproximateCounter sets seed for randomization
+
+static extract_features(cnf) → CNFFeatures
+  WHAT: Extract statistical features from CNF
+  WHY: Prepare input for ML model
+  CONNECTS TO: Called by generate_ml_hashes() and predict methods
+  
+  FEATURES EXTRACTED:
+    - Basic counts (variables, clauses, avg clause size)
+    - Variable occurrence statistics
+    - Positive/negative balance ratios
+    - Min/max occurrence counts
+  
+  RETURNS: CNFFeatures struct with all statistics
+
+predict_hash_config(cnf, num_hashes) → HashConfig
+  WHAT: Predict optimal hash configuration for given CNF
+  WHY: ML can suggest good sparsity and hash parameters
+  CONNECTS TO: Can be used to configure hash generation
+  
+  ALGORITHM:
+    1. Extract features from CNF
+    2. Call ML model with features
+    3. Model predicts optimal sparsity
+    4. Build HashConfig with predictions
+  
+  RETURNS: HashConfig with ML-predicted parameters
+
 generate_ml_hashes(cnf, num_hashes) → vector<XorConstraint>
-  WHAT: Generate XOR constraints using ML model
+  WHAT: Generate XOR constraints using ML model or heuristics
   WHY: Potentially better than random (lower variance)
   CONNECTS TO: Called by ApproximateCounter when use_ml_hashes=true
   
   ALGORITHM:
-    1. Extract CNF features:
-       - num_variables, num_clauses
-       - avg_clause_size
-       - variable_occurrences
-    2. If model_loaded_:
-       a. Call Python model with features
-       b. Model predicts good variable selections
-       c. Build XOR constraints from predictions
-    3. Else (model not loaded):
-       a. Fall back to random generation
-       b. Use fallback_generator_.generate_random_hashes()
+    1. Extract CNF features
+    2. If model_available_:
+       a. Call Python ML predictor with features
+       b. Model predicts variable importance scores
+       c. Build XOR constraints using importance-weighted sampling
+       d. Add randomization via noise_dist_
+    3. Else (model not available):
+       a. Fall back to heuristic-based generation
+       b. Use generate_heuristic_hashes()
   
   ML MODEL:
     - Trained on past formulas and XOR constraint effectiveness
@@ -1007,12 +1214,78 @@ generate_ml_hashes(cnf, num_hashes) → vector<XorConstraint>
     - Can adapt to formula structure (dense, sparse, structured, random)
   
   FALLBACK:
-    Always works even if ML unavailable - degrades gracefully to random
+    Always works even if ML unavailable - degrades gracefully to heuristics
   
   RETURNS: List of XorConstraint objects
 
-is_model_loaded() → bool
-  WHAT: Check if ML model successfully loaded
+predict_variable_importance(cnf) → vector<double>
+  WHAT: Predict importance score for each variable
+  WHY: Guide XOR constraint generation toward important variables
+  CONNECTS TO: Used internally by generate_ml_hashes()
+  
+  ALGORITHM:
+    1. Extract features from CNF
+    2. Call Python ML model
+    3. Model returns importance score per variable
+    4. Higher score = more important for counting
+  
+  RETURNS: Vector of importance scores (one per variable)
+
+PRIVATE METHODS:
+
+start_ml_server() → bool
+  WHAT: Start persistent Python ML server process
+  WHY: Avoid loading model for each prediction (expensive)
+  CONNECTS TO: Called by constructor
+  
+  ALGORITHM:
+    1. Fork Python process running ml_server.py
+    2. Set up pipes for stdin/stdout/stderr
+    3. Wait for server ready signal
+    4. Store process ID
+  
+  RETURNS: true if server started successfully
+
+stop_ml_server()
+  WHAT: Stop persistent Python ML server
+  WHY: Clean up resources
+  CONNECTS TO: Called by destructor
+  
+  ALGORITHM:
+    1. Send shutdown signal to server
+    2. Close pipes
+    3. Kill process if needed
+
+call_python_predictor(features) → vector<double>
+  WHAT: Call Python ML model via persistent server
+  WHY: Get predictions from trained model
+  CONNECTS TO: Called by predict methods
+  
+  ALGORITHM:
+    1. Serialize features to JSON
+    2. Send to Python server via stdin
+    3. Read predictions from stdout
+    4. Parse and return
+  
+  RETURNS: Prediction vector from ML model
+
+generate_heuristic_hashes(cnf, num_hashes) → vector<XorConstraint>
+  WHAT: Generate XOR constraints using variable statistics (no ML)
+  WHY: Fallback when ML model unavailable
+  CONNECTS TO: Called when model_available_=false
+  
+  HEURISTIC:
+    - Prefer variables with balanced positive/negative occurrences
+    - Prefer frequently occurring variables
+    - Use recommended sparsity based on formula size
+  
+  ALGORITHM:
+    1. Compute variable statistics
+    2. Rank variables by balance and occurrence
+    3. Generate XOR constraints favoring high-ranked variables
+    4. Still includes randomization for universal hashing
+  
+  RETURNS: List of heuristic-based XorConstraints
   WHY: Know whether ML generation is active
   CONNECTS TO: Can be used for diagnostics
 
@@ -1063,22 +1336,140 @@ USAGE:
   
 BEHAVIOR:
   - If call succeeds: continue normally
-  - If call fails: Log error, throw exception
+  - If call fails: Throw CUDAException with file, line, and error info
 
 --------------------------------------------------------------------------------
-FUNCTION: cuda::get_cuda_error_string(cudaError_t error) → string
+CLASS: CUDAException
 --------------------------------------------------------------------------------
-WHAT: Convert CUDA error code to human-readable string
-WHY: Better error messages
-CONNECTS TO: Used by CUDA_CHECK macro
+WHAT: Exception class for CUDA errors
+WHY: Structured error handling for GPU operations
+CONNECTS TO: Thrown by CUDA_CHECK macro
+
+CONSTRUCTOR:
+  CUDAException(file, line, error)
+    - Stores error location and CUDA error code
+    - Formats informative error message
+
+METHODS:
+  what() → const char*
+    - Returns formatted error message
+    - Includes file, line, and error description
+
+--------------------------------------------------------------------------------
+STRUCT: GPUInfo
+--------------------------------------------------------------------------------
+WHAT: Structure containing GPU device information
+WHY: Encapsulate device properties for easy access
+CONNECTS TO: Returned by get_gpu_info()
+
+FIELDS:
+  - device_id: GPU device index
+  - name: GPU device name
+  - total_memory: Total global memory (bytes)
+  - free_memory: Available memory (bytes)
+  - compute_capability_major: Major compute capability version
+  - compute_capability_minor: Minor compute capability version
+  - multiprocessor_count: Number of streaming multiprocessors
+  - max_threads_per_block: Maximum threads per block
+  - max_shared_memory_per_block: Maximum shared memory per block (bytes)
+
+--------------------------------------------------------------------------------
+FUNCTION: get_gpu_info(device_id = 0) → GPUInfo
+--------------------------------------------------------------------------------
+WHAT: Query GPU device properties
+WHY: Get detailed information about available GPU
+CONNECTS TO: Used for diagnostics and capability checking
+RETURNS: GPUInfo struct with all device properties
+
+--------------------------------------------------------------------------------
+FUNCTION: print_gpu_info(device_id = 0)
+--------------------------------------------------------------------------------
+WHAT: Print GPU information to log
+WHY: Display GPU capabilities to user
+CONNECTS TO: Called by main() when --gpu-info flag set
+OUTPUT: Device name, memory, compute capability, etc.
+
+--------------------------------------------------------------------------------
+FUNCTION: is_cuda_available() → bool
+--------------------------------------------------------------------------------
+WHAT: Check if CUDA is available and functional
+WHY: Enable GPU features only when hardware supports it
+CONNECTS TO: Called by main() at startup, ApproximateCounter in constructor
+
+CHECKS:
+  1. CUDA runtime installed
+  2. CUDA driver loaded
+  3. At least one GPU device available
+  4. Device has sufficient compute capability
+  
+RETURNS: true if all checks pass, false otherwise
+
+--------------------------------------------------------------------------------
+FUNCTION: get_optimal_block_size(num_elements) → int
+--------------------------------------------------------------------------------
+WHAT: Calculate optimal CUDA block size for given problem size
+WHY: Performance tuning - different sizes work better for different problems
+CONNECTS TO: Used by kernel launch configurations
+
+HEURISTIC:
+  - Small problems (< 256 elements): Use smaller blocks
+  - Large problems: Use 256 or 512 threads per block
+  - Considers GPU occupancy and shared memory
+
+RETURNS: Recommended block size (threads per block)
+
+--------------------------------------------------------------------------------
+TEMPLATE CLASS: DeviceArray<T>
+--------------------------------------------------------------------------------
+WHAT: RAII wrapper for GPU memory allocation
+WHY: Automatic memory management, prevent leaks
+CONNECTS TO: Used throughout CUDA code for device arrays
+
+METHODS:
+
+DeviceArray()
+  - Default constructor, no allocation
+
+DeviceArray(size)
+  - Allocate size elements on GPU
+  - Throws CUDAException if allocation fails
+
+~DeviceArray()
+  - Automatically free GPU memory in destructor
+  - RAII ensures no memory leaks
+
+resize(new_size)
+  - Reallocate array to new size
+  - Frees old memory, allocates new
+
+copy_to_device(host_data, size)
+  - Copy data from CPU to GPU
+  - Uses cudaMemcpy with cudaMemcpyHostToDevice
+
+copy_from_device(host_data, size)
+  - Copy data from GPU to CPU
+  - Uses cudaMemcpy with cudaMemcpyDeviceToHost
+
+data() → T*
+  - Get raw device pointer
+  - For passing to kernels
+
+size() → size_t
+  - Get array size in elements
+
+MOVE SEMANTICS:
+  - Move constructor and assignment supported
+  - Copy constructor/assignment deleted (prevent accidental copies)
+  - Efficient transfer of ownership
 
 FILE: cuda/gpu_utils.cu
 PURPOSE: Implementation of CUDA utilities
 
 IMPLEMENTATION:
-  - Wraps cudaGetErrorString()
-  - Adds context information
-  - Logs to Logger
+  - CUDAException formats messages with cudaGetErrorString()
+  - get_gpu_info() queries cudaGetDeviceProperties()
+  - is_cuda_available() tries cudaGetDeviceCount()
+  - Logs to Logger for consistent messaging
 
 ================================================================================
 FILE: include/cuda/gpu_memory_pool.cuh
@@ -1093,45 +1484,41 @@ WHY: cudaMalloc/cudaFree are expensive - reuse buffers instead
 CONNECTS TO: Global instance used by all CUDA kernels
 
 HOW IT WORKS:
-  - Allocate buffers on first use
-  - Keep track of buffers by size
-  - Reuse existing buffers when requested
+  - Allocate buffers on first use by name
+  - Keep track of buffers by name in map
+  - Reuse existing buffers when same name requested
+  - Grows buffer if larger size requested
   - Free all buffers on destruction
 
 PRIVATE FIELDS:
-  - buffers_: Map from size → list of available buffers
-  - in_use_: Set of currently used buffers
-  - total_allocated_: Total GPU memory allocated
+  - buffers_: Map from name → Buffer struct (ptr + size)
+
+PRIVATE STRUCT:
+  Buffer: { void* ptr; size_t size; }
 
 PUBLIC METHODS:
 
-get_buffer(size) → void*
-  WHAT: Get GPU buffer of at least 'size' bytes
-  WHY: Avoid repeated cudaMalloc calls
+get_buffer(min_size, name = "buffer") → void*
+  WHAT: Get GPU buffer of at least 'min_size' bytes with given name
+  WHY: Avoid repeated cudaMalloc calls, named buffers for easy tracking
   CONNECTS TO: Called by kernel launch code
   
   ALGORITHM:
-    1. Look for existing buffer of this size in buffers_[size]
-    2. If found:
-       a. Remove from buffers_ list
-       b. Add to in_use_ set
-       c. Return pointer
-    3. If not found:
-       a. Call cudaMalloc to allocate new buffer
-       b. Add to in_use_ set
-       c. Increment total_allocated_
+    1. Look for buffer with this name in buffers_ map
+    2. If found and size >= min_size:
+       a. Return existing pointer (reuse)
+    3. Else (not found or too small):
+       a. If buffer exists, cudaFree old buffer
+       b. Call cudaMalloc to allocate new buffer of min_size
+       c. Store in buffers_[name] = {ptr, min_size}
        d. Return pointer
   
-  RETURNS: Pointer to GPU memory
-
-return_buffer(ptr, size)
-  WHAT: Return buffer to pool for reuse
-  WHY: Make buffer available for next get_buffer() call
-  CONNECTS TO: Called after kernel completes
+  BENEFITS:
+    - Named buffers prevent confusion
+    - Automatically grows buffers as needed
+    - Simple interface (no explicit return needed)
   
-  ALGORITHM:
-    1. Remove ptr from in_use_ set
-    2. Add ptr to buffers_[size] list
+  RETURNS: Pointer to GPU memory
 
 clear()
   WHAT: Free all buffers in pool
@@ -1164,18 +1551,30 @@ PURPOSE: GPU-accelerated Gaussian elimination for XOR constraints
 CONNECTS TO: Used by ApproximateCounter to solve XOR systems
 
 --------------------------------------------------------------------------------
-FUNCTION: cuda::gaussian_elimination_gpu(matrix, rows, cols) → bool
+STRUCT: GPUXorConstraint
+--------------------------------------------------------------------------------
+WHAT: XOR constraint in GPU-friendly format
+WHY: Efficient GPU representation
+CONNECTS TO: Used internally by CUDA kernels
+
+FIELDS:
+  - variables: Array of variables (uint32_t*)
+  - size: Number of variables
+  - rhs: Right-hand side (0 or 1)
+
+--------------------------------------------------------------------------------
+FUNCTION: gaussian_elimination_gpu(xor_vars, xor_offsets, xor_rhs, num_variables, assignment) → bool
 --------------------------------------------------------------------------------
 WHAT: Solve XOR constraint system using GPU-parallel Gaussian elimination
 WHY: Many XOR constraints (100+) benefit from parallel processing
 CONNECTS TO: Called by ApproximateCounter::apply_xor_constraints()
 
 PARAMETERS:
-  - matrix: Augmented matrix [A|b] representing XOR system
-            Each row is one XOR constraint
-            Last column is RHS (0 or 1)
-  - rows: Number of XOR constraints
-  - cols: Number of variables + 1 (for RHS)
+  - xor_vars: Flattened array of all variables from all XOR constraints
+  - xor_offsets: Offset array marking start of each XOR constraint
+  - xor_rhs: RHS values (0 or 1) for each constraint
+  - num_variables: Total number of variables in CNF
+  - assignment: Output map of variable assignments (modified)
 
 GAUSSIAN ELIMINATION ALGORITHM:
   Goal: Reduce matrix to row echelon form
@@ -1197,7 +1596,7 @@ GAUSSIAN ELIMINATION ALGORITHM:
     - Significant speedup for large systems (100+ rows)
 
 ALGORITHM STEPS:
-  1. Copy matrix to GPU
+  1. Convert flat format to matrix representation on GPU
   2. For each pivot column:
      a. Find pivot on GPU (parallel scan)
      b. Swap rows on GPU
@@ -1205,32 +1604,100 @@ ALGORITHM STEPS:
      d. Synchronize
   3. Copy reduced matrix back to host
   4. Extract assignments from row echelon form
+  5. Populate assignment map
 
-RETURNS: true if system solvable, false if inconsistent
+RETURNS: true if system solvable (no conflicts), false if inconsistent
+
+--------------------------------------------------------------------------------
+FUNCTION: convert_xors_to_gpu_format(xors, flat_vars, offsets, rhs)
+--------------------------------------------------------------------------------
+WHAT: Convert vector of XorConstraints to GPU-friendly flat format
+WHY: GPU works better with flat arrays than nested structures
+CONNECTS TO: Called before gaussian_elimination_gpu()
+
+ALGORITHM:
+  1. Count total variables across all XORs
+  2. Allocate flat_vars array
+  3. Allocate offsets array (num_xors + 1)
+  4. Allocate rhs array (num_xors)
+  5. For each XOR constraint:
+     a. Store offset (current position in flat_vars)
+     b. Copy variables to flat_vars
+     c. Store RHS value
+     d. Advance position
+  6. Store final offset (total length)
+
+EXAMPLE:
+  Input: [XOR(vars=[1,3,5], rhs=1), XOR(vars=[2,4], rhs=0)]
+  Output:
+    flat_vars = [1,3,5,2,4]
+    offsets = [0, 3, 5]
+    rhs = [1, 0]
+
+--------------------------------------------------------------------------------
+NAMESPACE: internal
+--------------------------------------------------------------------------------
+WHAT: Internal kernel declarations for Gaussian elimination
+WHY: Organize implementation details, not part of public API
+CONNECTS TO: Used by gaussian_elimination_gpu() implementation
+
+KERNELS:
+
+__global__ row_reduce_kernel(matrix, rhs, num_rows, num_cols, pivot_col, has_conflict)
+  WHAT: Perform row reduction at pivot column
+  WHY: Core elimination step
+  PARALLELIZATION: One thread per row
+  
+  ALGORITHM:
+    threadId = blockIdx * blockDim + threadIdx
+    if matrix[threadId][pivot_col] == 1 and threadId != pivot_row:
+      XOR row threadId with pivot row
+      Update RHS
+    Check for conflicts (all zeros with RHS=1)
+  
+  MODIFIES: matrix, rhs, has_conflict (set if conflict detected)
+
+__global__ find_pivot_kernel(matrix, num_rows, num_cols, col, pivot_row)
+  WHAT: Find row with 1 in column 'col'
+  WHY: Need pivot for elimination
+  PARALLELIZATION: Parallel search across rows
+  
+  ALGORITHM:
+    Each thread checks one or more rows
+    First thread to find 1 in target column writes row index to pivot_row
+  
+  OUTPUT: pivot_row (index of pivot, or -1 if not found)
+
+__global__ back_substitution_kernel(matrix, rhs, num_rows, num_cols, assignment_vars, assignment_values, num_assignments)
+  WHAT: Extract variable assignments from row echelon form
+  WHY: Final step of Gaussian elimination
+  PARALLELIZATION: One thread per row
+  
+  ALGORITHM:
+    For each row with leading 1:
+      Find leading variable
+      Compute value from RHS and already assigned variables
+      Store in assignment arrays
+  
+  OUTPUT: assignment_vars, assignment_values (parallel arrays), num_assignments
 
 FILE: cuda/gaussian_elimination.cu
 PURPOSE: Implementation of GPU Gaussian elimination
 
-KEY KERNELS:
-
-find_pivot_kernel<<<...>>>
-  WHAT: Find row with 1 in current pivot column
-  WHY: Need pivot for elimination step
-  PARALLELIZATION: One thread per row, parallel search
-
-eliminate_kernel<<<...>>>
-  WHAT: Eliminate pivot column in all rows
-  WHY: Core of Gaussian elimination
-  PARALLELIZATION: One thread per row
-  ALGORITHM:
-    For each row r:
-      If row r has 1 in pivot column:
-        XOR entire row r with pivot row
+KEY IMPLEMENTATION DETAILS:
+  - Builds binary matrix from XOR constraints
+  - Matrix stored as uint32_t bit vectors for efficiency
+  - Each uint32_t holds 32 columns of the matrix
+  - XOR operations implemented as bitwise XOR
+  - Uses shared memory for pivot row (faster access)
+  - Uses memory pool for all GPU buffers
+  - Handles edge cases (no pivot found, inconsistent system)
 
 GPU OPTIMIZATION:
-  - Uses shared memory for pivot row (fast access)
-  - Coalesced memory access for matrix
-  - Uses memory pool for buffers (avoid malloc overhead)
+  - Coalesced memory access patterns
+  - Minimal host-device transfers
+  - Efficient bit-packed representation
+  - Shared memory for frequently accessed data
 
 ================================================================================
 FILE: include/cuda/clause_evaluation.cuh
@@ -1435,12 +1902,42 @@ static instance() → Logger&
 set_level(level)
   WHAT: Set minimum log level
   WHY: Control verbosity
-  CONNECTS TO: main() sets to DEBUG if --verbose
+  CONNECTS TO: Can manually set to DEBUG, INFO, WARNING, or ERROR
 
-log(level, message)
-  WHAT: Log message at specified level
-  WHY: Flexible logging
+set_verbose(verbose)
+  WHAT: Set verbose mode (enables/disables DEBUG level)
+  WHY: Convenient toggle for debug output
+  CONNECTS TO: main() calls this with --verbose flag
+  BEHAVIOR:
+    - verbose=true: sets level to DEBUG
+    - verbose=false: sets level to INFO
+
+log(level, args...)
+  WHAT: Log message at specified level with variadic template arguments
+  WHY: Flexible logging with any number and type of arguments
   CONNECTS TO: Internal implementation of LOG_* macros
+  
+  TEMPLATE: template<typename... Args>
+  HOW IT WORKS:
+    - Uses variadic templates for flexible argument handling
+    - Uses log_helper() to recursively format all arguments
+    - All arguments converted to string and concatenated
+    - Thread-safe via mutex protection
+
+log_helper(oss, arg, args...)
+  WHAT: Recursive helper for formatting variadic arguments
+  WHY: Unpack parameter pack and format each argument
+  CONNECTS TO: Called by log() method
+  
+  TEMPLATE: template<typename T, typename... Args>
+  HOW IT WORKS:
+    - Base case: single argument, append to ostringstream
+    - Recursive case: append first arg, recurse with remaining args
+
+debug(args...), info(args...), warning(args...), error(args...)
+  WHAT: Convenience methods for logging at specific levels
+  WHY: Type-safe logging without specifying level explicitly
+  CONNECTS TO: Can call directly instead of using macros
 
 MACROS (for convenience):
 
@@ -1452,17 +1949,24 @@ LOG_ERROR(...): Log error
 USAGE:
   LOG_INFO("Starting computation with ", n, " variables");
   LOG_DEBUG("Iteration ", i, " complete");
+  Logger::instance().info("Formula has ", cnf.num_clauses(), " clauses");
 
 OUTPUT FORMAT:
   [HH:MM:SS.mmm] LEVEL: message
+  
+  Example:
+  [14:32:18.456] INFO: Starting computation with 100 variables
+  [14:32:18.789] DEBUG: Iteration 5 complete
 
 FILE: src/utils/logger.cpp
 PURPOSE: Logger implementation
 
 IMPLEMENTATION:
-  - Uses std::chrono for timestamps
-  - Thread-safe (mutex protected)
-  - Outputs to std::cout (info/debug) or std::cerr (warning/error)
+  - Uses std::chrono for high-resolution timestamps
+  - Thread-safe (std::mutex protected)
+  - Outputs to std::cout (all levels for now)
+  - Uses std::ostringstream for message formatting
+  - Template methods in header (inline)
 
 ================================================================================
 FILE: include/utils/timer.h
@@ -1483,46 +1987,56 @@ start()
   WHY: Begin timing interval
   CONNECTS TO: Called at start of operation
 
-stop() → double
-  WHAT: Stop timer and return elapsed seconds
-  WHY: Get timing result
+stop()
+  WHAT: Stop timer (doesn't return value, stores end time)
+  WHY: Mark end of timing interval
   CONNECTS TO: Called at end of operation
-  RETURNS: Elapsed time in seconds
 
-elapsed() → double
-  WHAT: Get elapsed time without stopping
-  WHY: Check progress
-  RETURNS: Seconds since start()
+elapsed_seconds() → double
+  WHAT: Get elapsed time in seconds
+  WHY: Query timing result
+  CONNECTS TO: Can be called during or after timing
+  RETURNS: Seconds since start() (or until stop() if stopped)
+
+elapsed_ms() → double
+  WHAT: Get elapsed time in milliseconds
+  WHY: More granular timing information
+  RETURNS: Milliseconds since start()
+
+reset()
+  WHAT: Reset timer to initial state
+  WHY: Reuse timer object for new measurement
+  CONNECTS TO: Clears start and end times
 
 --------------------------------------------------------------------------------
 CLASS: ScopedTimer
 --------------------------------------------------------------------------------
-WHAT: RAII timer that auto-registers with TimerRegistry
-WHY: Convenient timing with automatic registration
+WHAT: RAII timer that auto-starts and auto-stops with TimerRegistry
+WHY: Convenient timing with automatic start/stop
 CONNECTS TO: ApproximateCounter uses this
 
 USAGE:
   {
     ScopedTimer timer("my_operation");
     // ... operation ...
-  }  // Timer stops here, registers elapsed time
+  }  // Timer stops here automatically
 
 CONSTRUCTOR:
   ScopedTimer(name)
-    - Starts timing
-    - Stores name for registration
+    - Calls TimerRegistry::instance().start(name)
+    - Stores name for destructor
 
 DESTRUCTOR:
   ~ScopedTimer()
-    - Stops timing
-    - Registers elapsed time with TimerRegistry
+    - Calls TimerRegistry::instance().stop(name)
+    - Automatic cleanup via RAII
 
 --------------------------------------------------------------------------------
 CLASS: TimerRegistry (Singleton)
 --------------------------------------------------------------------------------
 WHAT: Global registry of named timers
 WHY: Collect timing statistics from entire execution
-CONNECTS TO: ScopedTimer auto-registers, ApproximateCounter queries results
+CONNECTS TO: ScopedTimer uses this, main() can query for reports
 
 METHODS:
 
@@ -1531,9 +2045,17 @@ static instance() → TimerRegistry&
   WHY: Global registry
   CONNECTS TO: All timers register here
 
-register_time(name, seconds)
-  WHAT: Record timing result
-  WHY: Accumulate statistics
+start(name)
+  WHAT: Start timer with given name
+  WHY: Begin timing for named operation
+  CONNECTS TO: Called by ScopedTimer constructor
+  BEHAVIOR: Creates timer if doesn't exist, starts it
+
+stop(name)
+  WHAT: Stop timer with given name
+  WHY: End timing for named operation
+  CONNECTS TO: Called by ScopedTimer destructor
+  BEHAVIOR: Stops timer if exists
   CONNECTS TO: Called by ScopedTimer destructor
 
 get_elapsed(name) → double
@@ -1542,66 +2064,114 @@ get_elapsed(name) → double
   CONNECTS TO: ApproximateCounter queries "total_counting" timer
   RETURNS: Elapsed seconds, or 0.0 if name not found
 
-get_all_timings() → map<string, double>
-  WHAT: Get all timing results
-  WHY: Generate complete performance report
-  CONNECTS TO: Could be used for detailed profiling
+print_all()
+  WHAT: Print all timing results to log
+  WHY: Display comprehensive performance report
+  CONNECTS TO: main() calls this when --verbose flag set
+  OUTPUT: List of all timers with their elapsed times
+
+reset(name)
+  WHAT: Reset specific timer
+  WHY: Clear timing for reuse
+  CONNECTS TO: Can reset individual timers
+
+clear()
+  WHAT: Clear all timers from registry
+  WHY: Reset entire timing state
+  CONNECTS TO: Can be called between runs
 
 FILE: src/utils/timer.cpp
 PURPOSE: Timer implementation
 
 IMPLEMENTATION:
-  - Uses std::chrono::high_resolution_clock
-  - Stores timings in unordered_map
-  - Thread-safe (mutex protected)
+  - Uses std::chrono::high_resolution_clock for precision
+  - Stores Timer objects in unordered_map<string, Timer>
+  - Thread-safe (std::mutex protected)
+  - print_all() iterates map and logs each timer
 
 ================================================================================
                       EXECUTION FLOW SUMMARY
 ================================================================================
 
-When you run: ./bin/sharp_sat formula.cnf
+When you run: ./bin/sharp_sat formula.cnf [options]
 
 COMPLETE FLOW:
 
 1. main() starts (src/main.cpp)
    ↓
-2. Check CUDA availability (cuda_interface.h)
+2. Parse command-line arguments
+   - Handle --epsilon, --delta, --trials, --timeout, etc.
+   - Calculate trials from epsilon/delta if needed
+   - Validate mutually exclusive options
    ↓
-3. Parse CNF file (CNFParser::parse_file)
+3. Set logging level (--verbose enables DEBUG)
    ↓
-4. Create ApproximateCounter with config
+4. Check CUDA availability (cuda::is_cuda_available())
+   - Log GPU status
+   - Show GPU info if --gpu-info flag set
    ↓
-5. ApproximateCounter::count(cnf)
+5. Parse CNF file (CNFParser::parse_file)
+   - Returns unique_ptr<CNF>
+   - Log parse time and formula statistics
    ↓
-6. ApproximateCounter::approxmc(cnf)
+6. Create CounterConfig from AppConfig
+   - Transfer all user settings
+   - Set timeout_seconds and num_trials
    ↓
-   ├─→ 7. find_pivot_threshold(cnf)
+7. Create ApproximateCounter with config
+   - Initialize XorHashGenerator with seed
+   - Initialize MLHashInterface (if use_ml enabled)
+   - Create SATSolver with timeout and GPU flags
+   ↓
+8. ApproximateCounter::count(cnf)
+   - Start ScopedTimer("total_counting")
+   - Log formula info and config
+   ↓
+9. ApproximateCounter::approxmc(cnf)
+   ↓
+   ├─→ 10. find_hash_level(cnf)
+   │      - Binary search for optimal hash level k
+   │      - Goal: Find k where SAT probability is 30-80%
    │      ↓
-   │      └─→ Binary search:
-   │          ├─→ generate XOR constraints (XorHashGenerator or MLHashInterface)
+   │      └─→ For each candidate level:
+   │          ├─→ Generate XOR constraints (ML or random)
    │          ├─→ check_sat_with_xors()
-   │          │   ├─→ apply_xor_constraints() [Gaussian elimination on GPU]
+   │          │   ├─→ apply_xor_constraints() [Gaussian elimination]
+   │          │   │   └─→ cuda::gaussian_elimination_gpu() if GPU enabled
    │          │   └─→ SATSolver::solve()
    │          │       ├─→ CNFSimplifier::simplify()
    │          │       └─→ SATSolver::dpll()
    │          │           ├─→ unit_propagation (GPU or CPU)
-   │          │           │   └─→ cuda::unit_propagation_gpu() [if GPU enabled]
+   │          │           │   └─→ cuda::unit_propagation_gpu() [if GPU]
    │          │           ├─→ choose_variable() [MOMS heuristic]
    │          │           └─→ recursive branching
-   │          └─→ compute SAT probability, adjust threshold
+   │          └─→ Adjust search based on SAT probability
    │
-   └─→ 8. Run iterations at pivot threshold
+   └─→ 11. Run config.num_trials iterations at hash level k
        ├─→ For each iteration:
-       │   ├─→ generate XOR constraints
+       │   ├─→ Generate k XOR constraints (ML or random)
        │   └─→ check_sat_with_xors() [same as above]
        ├─→ Count successful SAT checks
-       └─→ Estimate count from SAT probability
+       ├─→ Calculate SAT probability
+       └─→ Estimate count:
+           - cell_threshold = ceil(4.03 * (1 + 1/epsilon)^2)
+           - cell_size = 2^(num_variables - k)
+           - count = cell_size * (iterations / sat_count) * cell_threshold
    ↓
-9. compute_bounds() [statistical confidence bounds]
+12. compute_bounds(hash_level, num_variables, result)
+    - lower = count / exp(epsilon)
+    - upper = count * exp(epsilon)
    ↓
-10. Return CountResult to main()
+13. Return CountResult to main()
    ↓
-11. Display results to user
+14. Display results to user
+    - Approximate count
+    - Confidence bounds
+    - Iterations
+    - Time
+   ↓
+15. Print timing statistics if --verbose
+    - TimerRegistry::instance().print_all()
 
 KEY INVARIANTS:
 

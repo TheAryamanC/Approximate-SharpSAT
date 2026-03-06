@@ -3,23 +3,24 @@
 #include "cuda_interface.h"
 #include "cuda/clause_evaluation.cuh"
 #include <algorithm>
+#include <chrono>
 
 using namespace std;
 namespace sharpsat {
 
 // Constructors
 SATSolver::SATSolver() 
-    : max_decisions_(1000000), timeout_seconds_(300.0), 
+    : timeout_seconds_(60.0), start_time_(0.0),
       num_decisions_(0), num_conflicts_(0), use_gpu_(false) {
 }
 
-SATSolver::SATSolver(uint32_t max_decisions) 
-    : max_decisions_(max_decisions), timeout_seconds_(300.0),
+SATSolver::SATSolver(double timeout_seconds) 
+    : timeout_seconds_(timeout_seconds), start_time_(0.0),
       num_decisions_(0), num_conflicts_(0), use_gpu_(false) {
 }
 
-SATSolver::SATSolver(uint32_t max_decisions, bool use_gpu) 
-    : max_decisions_(max_decisions), timeout_seconds_(300.0),
+SATSolver::SATSolver(double timeout_seconds, bool use_gpu) 
+    : timeout_seconds_(timeout_seconds), start_time_(0.0),
       num_decisions_(0), num_conflicts_(0), use_gpu_(use_gpu) {
 }
 
@@ -34,6 +35,10 @@ bool SATSolver::solve(const CNF& cnf, const unordered_map<Variable, bool>& parti
     // pass by reference to avoid copying assignment map
     reset_stats();
     assignment_ = partial_assignment;
+    
+    // Start timing
+    auto start = std::chrono::high_resolution_clock::now();
+    start_time_ = std::chrono::duration<double>(start.time_since_epoch()).count();
     
     // clone CNF to work on without modifying original
     CNF working_cnf = cnf.clone();
@@ -57,9 +62,13 @@ bool SATSolver::solve(const CNF& cnf, const unordered_map<Variable, bool>& parti
 
 // DPLL search
 bool SATSolver::dpll(CNF& cnf, unordered_map<Variable, bool>& assignment) {
-    // check if reached decision limit
-    if (num_decisions_ >= max_decisions_) {
-        LOG_DEBUG("SAT solver reached decision limit");
+    // check if timeout exceeded
+    auto now = std::chrono::high_resolution_clock::now();
+    double current_time = std::chrono::duration<double>(now.time_since_epoch()).count();
+    double elapsed = current_time - start_time_;
+    
+    if (elapsed >= timeout_seconds_) {
+        LOG_DEBUG("SAT solver timeout after ", elapsed, " seconds");
         return false;
     }
     

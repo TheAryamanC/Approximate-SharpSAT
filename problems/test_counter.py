@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-Comprehensive benchmarking script for SharpSAT
-Runs multiple trials to measure:
-1. Variance with/without ML
-2. GPU vs CPU performance
-3. Identifies scenarios where GPU wins
-"""
-
 import subprocess
 import json
 import statistics
@@ -14,6 +5,7 @@ import time
 import os
 import sys
 from pathlib import Path
+import math
 
 class BenchmarkRunner:
     def __init__(self, executable_path, cnf_dir):
@@ -23,9 +15,7 @@ class BenchmarkRunner:
         
     def run_single_trial(self, cnf_file, use_ml=False, use_cuda=True, epsilon=0.8, delta=0.2, seed=None):
         """Run a single trial and extract timing and count information"""
-        cmd = [self.executable, str(cnf_file), 
-               "--epsilon", str(epsilon), 
-               "--delta", str(delta)]
+        cmd = [self.executable, str(cnf_file), "--epsilon", str(epsilon), "--delta", str(delta)]
         
         if use_ml:
             cmd.append("--use-ml")
@@ -40,12 +30,12 @@ class BenchmarkRunner:
             wall_time = time.time() - start
             
             if result.returncode != 0:
-                print(f"\n    Return code: {result.returncode}")
+                print(f"Return code: {result.returncode}")
                 if result.stderr:
-                    print(f"    Stderr: {result.stderr[:200]}")
+                    print(f"Stderr: {result.stderr[:200]}")
                 return None
                 
-            # Parse output
+            # parse output
             output = result.stdout
             count = None
             reported_time = None
@@ -89,7 +79,7 @@ class BenchmarkRunner:
                 'success': count is not None
             }
         except subprocess.TimeoutExpired:
-            print(f"\n    Timeout after 30s")
+            print(f"Timeout after 30s")
             return None
         except Exception as e:
             print(f"Error running trial: {e}")
@@ -97,8 +87,8 @@ class BenchmarkRunner:
             
     def run_trials(self, cnf_file, num_trials=10, **kwargs):
         """Run multiple trials and collect statistics"""
-        print(f"\nRunning {num_trials} trials for {cnf_file.name}")
-        print(f"  Config: ML={kwargs.get('use_ml', False)}, CUDA={kwargs.get('use_cuda', True)}")
+        print(f"Running {num_trials} trials for {cnf_file.name}")
+        print(f"Config: ML={kwargs.get('use_ml', False)}, CUDA={kwargs.get('use_cuda', True)}")
         
         results = []
         times = []
@@ -106,8 +96,8 @@ class BenchmarkRunner:
         iterations_list = []
         
         for i in range(num_trials):
-            print(f"  Trial {i+1}/{num_trials}...", end='', flush=True)
-            # Use different seed for each trial to observe variance
+            print(f"Trial {i+1}/{num_trials}...", end='', flush=True)
+            # use different seed for each trial to observe variance
             trial_seed = 42 + i
             result = self.run_single_trial(cnf_file, seed=trial_seed, **kwargs)
             if result and result['success']:
@@ -115,20 +105,20 @@ class BenchmarkRunner:
                 times.append(result['time'])
                 if result['count'] is not None:
                     counts.append(result['count'])
-                    # Show the count for this trial
+                    # show the count for this trial
                     count_str = f"{result['count']:.2e}" if result['count'] > 1e6 else f"{result['count']:.0f}"
-                    print(f" ✓ (count: {count_str}, time: {result['time']:.3f}s)")
+                    print(f"(count: {count_str}, time: {result['time']:.3f}s)")
                 else:
-                    print(" ✓")
+                    print(f"(time: {result['time']:.3f}s, count not reported)")
                 if result['iterations'] is not None:
                     iterations_list.append(result['iterations'])
             else:
-                print(" ✗ (failed)")
+                print("trial failed or did not report count")
                 
         if not results:
             return None
             
-        # Compute statistics
+        # compute statistics
         stats = {
             'cnf_file': str(cnf_file.name),
             'num_successful_trials': len(results),
@@ -145,15 +135,14 @@ class BenchmarkRunner:
         }
         
         if counts:
-            # Calculate variance using log-scale for large numbers to avoid overflow
-            import math
+            # calculate variance using log-scale for large numbers to avoid overflow
             mean_count = statistics.mean(counts)
             if mean_count > 0:
-                # Use log-scale for very large numbers
+                # log-scale for very large numbers
                 if mean_count > 1e50:
-                    # Filter out zeros and compute log only for valid values
+                    # filter out zeros and compute log only for valid values
                     log_counts = [math.log10(c) for c in counts if c > 0]
-                    # Check for inf/nan
+                    # check for inf/nan
                     log_counts = [x for x in log_counts if math.isfinite(x)]
                     
                     if len(log_counts) > 1 and len(set(log_counts)) > 1:
@@ -209,10 +198,6 @@ class BenchmarkRunner:
         ]
         
         for cnf_file in cnf_files:
-            print(f"\n{'='*70}")
-            print(f"Benchmarking: {cnf_file.name}")
-            print(f"{'='*70}")
-            
             cnf_results = {'cnf_file': str(cnf_file.name), 'configs': {}}
             
             for config in configs:
@@ -222,7 +207,7 @@ class BenchmarkRunner:
                 # Print which configuration is being tested
                 ml_status = "ML enabled" if config_params.get('use_ml', False) else "ML disabled"
                 cuda_status = "CUDA enabled" if config_params.get('use_cuda', False) else "CUDA disabled"
-                print(f"\nConfiguration: {config_name} ({ml_status}, {cuda_status})")
+                print(f"Configuration: {config_name} ({ml_status}, {cuda_status})")
                 
                 stats = self.run_trials(cnf_file, num_trials=num_trials, **config_params)
                 if stats:
@@ -248,7 +233,7 @@ class BenchmarkRunner:
                 print("  No successful runs")
                 continue
                 
-            # Print comparison table
+            # print comparison table
             print(f"{'Config':<15} {'Time (s)':<15} {'Time CV %':<12} {'Count CV %':<12} {'Speedup':<10}")
             print("-" * 80)
             
@@ -271,7 +256,7 @@ class BenchmarkRunner:
                     
                 print(f"{config_name:<15} {time_mean:<15.3f} {time_cv:<12.2f} {count_cv:<12.2f} {speedup:<10}")
                 
-        # Print variance comparison
+        # print variance comparison
         print("\n" + "="*80)
         print("ML vs Non-ML VARIANCE COMPARISON")
         print("="*80)
@@ -301,9 +286,7 @@ class BenchmarkRunner:
         if ml_variances and no_ml_variances:
             print(f"Average ML CV: {statistics.mean(ml_variances):.2f}%")
             print(f"Average Non-ML CV: {statistics.mean(no_ml_variances):.2f}%")
-            avg_improvement = statistics.mean([(no_ml_variances[i] - ml_variances[i]) / no_ml_variances[i] * 100 
-                                              if no_ml_variances[i] > 0 else 0 
-                                              for i in range(len(ml_variances))])
+            avg_improvement = statistics.mean([(no_ml_variances[i] - ml_variances[i]) / no_ml_variances[i] * 100 if no_ml_variances[i] > 0 else 0 for i in range(len(ml_variances))])
             print(f"Average Improvement: {avg_improvement:.1f}%")
             
         # GPU vs CPU comparison
@@ -330,8 +313,8 @@ class BenchmarkRunner:
 
 def main():
     # Find executable
-    build_dir = Path(__file__).parent.parent / "build"
-    executable = build_dir / "sharp_sat"
+    bin_dir = Path(__file__).parent.parent / "bin"
+    executable = bin_dir / "sharp_sat"
     
     if not executable.exists():
         print(f"Error: Executable not found at {executable}")
@@ -361,7 +344,7 @@ def main():
     runner.print_summary(results)
     
     # Save results to JSON
-    output_file = build_dir / "benchmark_results.json"
+    output_file = bin_dir / "benchmark_results.json"
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\nDetailed results saved to: {output_file}")

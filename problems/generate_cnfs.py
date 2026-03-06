@@ -5,15 +5,7 @@ from typing import List
 
 
 def generate_3sat(num_vars: int, num_clauses: int, output_file: str, seed: int = 42) -> None:
-    """
-    Generate a random 3-SAT instance
-    
-    Args:
-        num_vars: Number of variables
-        num_clauses: Number of clauses
-        output_file: Output file path
-        seed: Random seed for reproducibility
-    """
+    """Generate a random 3-SAT instance"""
     random.seed(seed)
     
     with open(output_file, 'w') as f:
@@ -30,14 +22,7 @@ def generate_3sat(num_vars: int, num_clauses: int, output_file: str, seed: int =
 
 
 def generate_large_3sat(num_vars: int, clause_to_var_ratio: float, output_file: str) -> None:
-    """
-    Generate a large random 3-SAT instance with specified clause-to-variable ratio
-    
-    Args:
-        num_vars: Number of variables
-        clause_to_var_ratio: Ratio of clauses to variables (4.3 is near phase transition)
-        output_file: Output file path
-    """
+    """Generate a large random 3-SAT instance with specified clause-to-variable ratio"""
     num_clauses = int(num_vars * clause_to_var_ratio)
     
     clauses = []
@@ -59,13 +44,7 @@ def generate_large_3sat(num_vars: int, clause_to_var_ratio: float, output_file: 
 
 
 def generate_easy_sat_cnf(num_vars: int, output_file: str) -> None:
-    """
-    Generate a CNF that is easy to satisfy but has many variables
-    
-    Args:
-        num_vars: Number of variables
-        output_file: Output file path
-    """
+    """Generate a CNF that is easy to satisfy but has many variables"""
     # fewer clauses with lower ratio makes SAT easier
     num_clauses = int(num_vars * 2.0)
     
@@ -93,13 +72,7 @@ def generate_easy_sat_cnf(num_vars: int, output_file: str) -> None:
 
 
 def generate_horn_cnf(num_vars: int, output_file: str) -> None:
-    """
-    Generate Horn CNF (polynomial-time solvable)
-    
-    Args:
-        num_vars: Number of variables
-        output_file: Output file path
-    """
+    """Generate Horn CNF (polynomial-time solvable)"""
     num_clauses = int(num_vars * 2.5)
     
     clauses = []
@@ -128,14 +101,7 @@ def generate_horn_cnf(num_vars: int, output_file: str) -> None:
 
 
 def generate_ksat_cnf(num_vars: int, k: int, output_file: str) -> None:
-    """
-    Generate k-SAT CNF with exactly k literals per clause
-    
-    Args:
-        num_vars: Number of variables
-        k: Number of literals per clause (clause size)
-        output_file: Output file path
-    """
+    """Generate k-SAT CNF with exactly k literals per clause"""
     num_clauses = int(num_vars * 4.0)  # Standard ratio
     
     clauses = []
@@ -156,13 +122,7 @@ def generate_ksat_cnf(num_vars: int, k: int, output_file: str) -> None:
 
 
 def generate_random_cnf(num_vars: int, output_file: str) -> None:
-    """
-    Generate random CNF with variable-sized clauses
-    
-    Args:
-        num_vars: Number of variables
-        output_file: Output file path
-    """
+    """Generate random CNF with variable-sized clauses"""
     num_clauses = int(num_vars * 3.5)  # Moderate ratio
     
     clauses = []

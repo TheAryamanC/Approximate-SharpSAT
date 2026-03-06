@@ -7,6 +7,7 @@
 #include "solver/sat_solver.h"
 #include <memory>
 #include <vector>
+#include <cmath>
 
 namespace sharpsat {
 
@@ -15,14 +16,20 @@ struct CounterConfig {
     double epsilon;           // Approximation factor (tolerance) - e.g., 0.8 means count is within factor of exp(0.8) ~ 2.2
     double delta;             // Confidence parameter - e.g., 0.2 means 80% confidence
     uint32_t seed;            // Random seed
-    bool use_ml_hashes;       // Use ML-enhanced hash generation -- to see if any benefit by running a 2x2 grid of trials
-    bool use_cuda;            // Enable CUDA acceleration -- to see if any benefit by running a 2x2 grid of trials
-    double pivot_threshold;   // Threshold for satisfiability checks
-    uint32_t max_iterations;  // Maximum iterations per threshold
+    bool use_ml_hashes;       // Use ML-enhanced hash generation
+    bool use_cuda;            // Enable CUDA acceleration
+    double timeout_seconds;   // Timeout for each SAT solver call
+    uint32_t num_trials;      // Number of trials to run
     
     CounterConfig()
         : epsilon(0.8), delta(0.2), seed(42), use_ml_hashes(false),
-          use_cuda(true), pivot_threshold(9.0), max_iterations(10) {}
+          use_cuda(true), timeout_seconds(60.0), num_trials(10) {}
+    
+    // Calculate cell threshold from epsilon using ApproxMC formula: ceil(4.03 * (1 + 1/epsilon)^2)
+    double get_cell_threshold() const {
+        double ratio = 1.0 + 1.0 / epsilon;
+        return std::ceil(4.03 * ratio * ratio);
+    }
 };
 
 // Result of approximate counting
@@ -55,8 +62,9 @@ private:
     // Core counting algorithm - inspired by ApproxMC
     CountResult approxmc(const CNF& cnf);
     
-    // Find pivot threshold m such that adding m XOR constraints - formula is SAT with high probability
-    uint32_t find_pivot_threshold(const CNF& cnf);
+    // Find hash level (number of XOR constraints) where formula is SAT with reasonable probability
+    // This partitions the solution space into ~2^k cells
+    uint32_t find_hash_level(const CNF& cnf);
     
     // Check satisfiability with XOR constraints
     bool check_sat_with_xors(const CNF& cnf, const std::vector<XorConstraint>& xors, std::unordered_map<Variable, bool>& assignment);
@@ -64,8 +72,8 @@ private:
     // Apply XOR constraints via Gaussian elimination
     std::unordered_map<Variable, bool> apply_xor_constraints(const std::vector<XorConstraint>& xors, uint32_t num_variables);
     
-    // Compute bounds from threshold
-    void compute_bounds(double threshold, uint32_t num_variables, CountResult& result);
+    // Compute bounds from hash level
+    void compute_bounds(uint32_t hash_level, uint32_t num_variables, CountResult& result);
     
     CounterConfig config_;
     std::unique_ptr<XorHashGenerator> hash_generator_;

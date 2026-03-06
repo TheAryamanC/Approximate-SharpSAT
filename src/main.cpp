@@ -5,6 +5,7 @@
 #include "cuda_interface.h"
 #include <iostream>
 #include <cstring>
+#include <cmath>
 
 using namespace std;
 using namespace sharpsat;
@@ -17,9 +18,31 @@ struct AppConfig {
     bool use_ml = false;
     bool use_cuda = true;
     uint32_t seed = 42;
+    double timeout_seconds = 60.0;
+    uint32_t num_trials = 0;  // 0 means calculate from epsilon/delta
     bool verbose = false;
     bool show_gpu_info = false;
+    
+    // Track what user specified
+    bool epsilon_specified = false;
+    bool delta_specified = false;
+    bool trials_specified = false;
 };
+
+// Calculate number of trials from epsilon and delta using ApproxMC formula
+uint32_t calculate_trials(double epsilon, double delta) {
+    // Formula: iterations = 3 × ln(3/δ) / ε²
+    double iterations = 3.0 * std::log(3.0 / delta) / (epsilon * epsilon);
+    return static_cast<uint32_t>(std::ceil(iterations));
+}
+
+// Back-calculate epsilon from trials (assuming delta=0.2)
+double calculate_epsilon(uint32_t trials, double delta = 0.2) {
+    // From: trials = 3 × ln(3/δ) / ε²
+    // Solve for ε: ε = sqrt(3 × ln(3/δ) / trials)
+    double epsilon_sq = 3.0 * std::log(3.0 / delta) / trials;
+    return std::sqrt(epsilon_sq);
+}
 
 // Explain usage instructions
 void print_usage(const char* prog_name) {
@@ -27,14 +50,24 @@ void print_usage(const char* prog_name) {
          << "\nOptions:\n"
          << "  --epsilon <float>   Approximation factor (default: 0.8)\n"
          << "  --delta <float>     Confidence parameter (default: 0.2)\n"
+         << "                      Note: Cannot be used with --trials\n"
+         << "  --trials <int>      Number of trials to run\n"
+         << "                      If specified, epsilon is calculated for delta=0.2\n"
+         << "                      Cannot be used with --epsilon/--delta\n"
+         << "  --timeout <float>   Timeout in seconds per SAT call (default: 60.0)\n"
          << "  --use-ml            Enable ML-enhanced hash generation\n"
          << "  --no-cuda           Disable CUDA acceleration\n"
          << "  --seed <int>        Random seed (default: 42)\n"
          << "  --verbose           Enable detailed logging\n"
          << "  --gpu-info          Show GPU information\n"
          << "  --help              Show this help message\n"
-         << "\nExample:\n"
-         << "  " << prog_name << " formula.cnf --epsilon 0.8 --delta 0.2 --use-ml\n";
+         << "\nDefault behavior:\n"
+         << "  If neither --trials nor --epsilon/--delta is specified:\n"
+         << "  - Uses epsilon=0.8, delta=0.2\n"
+         << "  - Calculates trials = 3×ln(3/δ)/ε² ≈ 13\n"
+         << "\nExamples:\n"
+         << "  " << prog_name << " formula.cnf --epsilon 0.5 --delta 0.1\n"
+         << "  " << prog_name << " formula.cnf --trials 50\n";
 }
 
 // Parse command-line arguments
@@ -60,8 +93,15 @@ bool parse_args(int argc, char** argv, AppConfig& config) {
             return false;
         } else if (arg == "--epsilon" && i + 1 < argc) {
             config.epsilon = stod(argv[++i]);
+            config.epsilon_specified = true;
         } else if (arg == "--delta" && i + 1 < argc) {
             config.delta = std::stod(argv[++i]);
+            config.delta_specified = true;
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            config.timeout_seconds = std::stod(argv[++i]);
+        } else if (arg == "--trials" && i + 1 < argc) {
+            config.num_trials = std::stoul(argv[++i]);
+            config.trials_specified = true;
         } else if (arg == "--use-ml") {
             config.use_ml = true;
         } else if (arg == "--no-cuda") {
@@ -76,6 +116,22 @@ bool parse_args(int argc, char** argv, AppConfig& config) {
             std::cerr << "Unknown option: " << arg << std::endl;
             return false;
         }
+    }
+    
+    // Validate mutually exclusive options
+    if (config.trials_specified && (config.epsilon_specified || config.delta_specified)) {
+        std::cerr << "Error: Cannot specify both --trials and --epsilon/--delta\n";
+        std::cerr << "Use --trials to directly set iterations, OR use --epsilon/--delta to calculate them.\n";
+        return false;
+    }
+    
+    // Calculate trials from epsilon/delta if not specified
+    if (!config.trials_specified) {
+        config.num_trials = calculate_trials(config.epsilon, config.delta);
+    } else {
+        // Back-calculate epsilon from trials (with delta=0.2)
+        config.delta = 0.2;
+        config.epsilon = calculate_epsilon(config.num_trials, config.delta);
     }
     
     return true;
@@ -133,6 +189,18 @@ int main(int argc, char** argv) {
     counter_config.seed = config.seed;
     counter_config.use_ml_hashes = config.use_ml;
     counter_config.use_cuda = config.use_cuda;
+    counter_config.timeout_seconds = config.timeout_seconds;
+    counter_config.num_trials = config.num_trials;
+    
+    // Log parameter configuration
+    LOG_INFO("Configuration:");
+    LOG_INFO("  Epsilon: ", counter_config.epsilon);
+    LOG_INFO("  Delta: ", counter_config.delta);
+    LOG_INFO("  Trials: ", counter_config.num_trials, 
+             config.trials_specified ? " (user-specified)" : " (calculated from epsilon/delta)");
+    if (config.trials_specified) {
+        LOG_INFO("  Note: Epsilon back-calculated from trials for delta=0.2");
+    }
     
     if (config.use_ml) {
         LOG_INFO("ML-enhanced hash generation: ENABLED");

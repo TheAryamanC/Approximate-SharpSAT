@@ -12,8 +12,8 @@ namespace sharpsat {
 class SATSolver {
 public:
     SATSolver();
-    explicit SATSolver(uint32_t max_decisions);
-    explicit SATSolver(uint32_t max_decisions, bool use_gpu);
+    explicit SATSolver(double timeout_seconds);
+    explicit SATSolver(double timeout_seconds, bool use_gpu);
     
     // Check satisfiability
     bool solve(const CNF& cnf);
@@ -26,8 +26,9 @@ public:
         return assignment_; 
     }
     
-    // Set maximum number of decisions - if this is exceeded, the solver will give up and return false
-    void set_max_decisions(uint32_t max_decisions) { max_decisions_ = max_decisions; }
+    // Set timeout for solving
+    void set_timeout(double timeout_seconds) { timeout_seconds_ = timeout_seconds; }
+    double get_timeout() const { return timeout_seconds_; }
     
     // Enable/disable GPU acceleration
     void set_use_gpu(bool use_gpu) { use_gpu_ = use_gpu; }
@@ -47,8 +48,8 @@ private:
     
     CNFSimplifier simplifier_;
     std::unordered_map<Variable, bool> assignment_;
-    uint32_t max_decisions_;
     double timeout_seconds_;
+    double start_time_;
     uint64_t num_decisions_;
     uint64_t num_conflicts_;
     bool use_gpu_;

@@ -38,6 +38,9 @@ public:
     // Check if ML model is available
     bool is_available() const { return model_available_; }
     
+    // Set random seed for hash generation
+    void set_seed(uint32_t seed) { rng_.seed(seed); }
+    
     // Extract features from CNF
     static CNFFeatures extract_features(const CNF& cnf);
     
@@ -59,6 +62,7 @@ private:
     std::mt19937 rng_;
     std::uniform_real_distribution<double> uniform_dist_;
     std::uniform_int_distribution<int> bool_dist_;
+    std::normal_distribution<double> noise_dist_;  // For adding randomization to features
     
     // Persistent Python ML server
     FILE* python_stdin_;
