@@ -2,11 +2,13 @@ import subprocess
 import json
 import statistics
 import time
+import os
 import sys
 from pathlib import Path
+import math
 import random
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
@@ -223,31 +225,16 @@ class BenchmarkRunner:
                 'iterations': iterations,
                 'lower_bound': lower_bound,
                 'upper_bound': upper_bound,
-                'success': count is not None
+                'success': count is not None,
+                'timeout': False
             }
         except subprocess.TimeoutExpired:
-            return None
+            return {'success': False, 'timeout': True}
         except Exception as e:
-            return None
-            
-    def remove_outliers(self, data: List[float], method='iqr') -> List[float]:
-        """Remove outliers from data using IQR method"""
-        if len(data) < 4:
-            return data
-        
-        data_array = np.array(data)
-        q1 = np.percentile(data_array, 25)
-        q3 = np.percentile(data_array, 75)
-        iqr = q3 - q1
-        
-        lower_bound = q1 - 1.5 * iqr
-        upper_bound = q3 + 1.5 * iqr
-        
-        filtered = [x for x in data if lower_bound <= x <= upper_bound]
-        return filtered if len(filtered) >= 3 else data
+            return {'success': False, 'timeout': False}
             
     def run_trials(self, cnf_file, num_trials=10, **kwargs):
-        """Run multiple trials and collect statistics with outlier removal"""
+        """Run multiple trials and collect statistics"""
         num_vars = self.extract_num_vars(cnf_file)
         timeout = self.calculate_timeout(num_vars)
         
@@ -262,6 +249,12 @@ class BenchmarkRunner:
             # Use different seed for each trial
             trial_seed = 1000 + i * 13  # Different seeds to ensure variance
             result = self.run_single_trial(cnf_file, seed=trial_seed, timeout=timeout, **kwargs)
+            
+            # If any trial times out, skip the entire CNF
+            if result and result.get('timeout', False):
+                print(f"    ✗ Trial {i+1} timed out - skipping entire CNF")
+                return None
+            
             if result and result['success']:
                 results.append(result)
                 times.append(result['time'])
@@ -272,35 +265,52 @@ class BenchmarkRunner:
         
         if len(results) < 3:
             return None
-            
-        # Remove outliers from times and counts
-        times_clean = self.remove_outliers(times)
-        counts_clean = self.remove_outliers(counts) if counts else []
         
-        # Compute statistics
+        # Compute statistics using all data
         stats = {
             'cnf_file': str(cnf_file.name),
             'num_vars': num_vars,
             'num_successful_trials': len(results),
-            'num_trials_after_outlier_removal': len(times_clean),
             'config': kwargs,
             'time_stats': {
-                'mean': statistics.mean(times_clean),
-                'median': statistics.median(times_clean),
-                'stdev': statistics.stdev(times_clean) if len(times_clean) > 1 else 0,
-                'min': min(times_clean),
-                'max': max(times_clean),
+                'mean': statistics.mean(times),
+                'median': statistics.median(times),
+                'stdev': statistics.stdev(times) if len(times) > 1 else 0,
+                'min': min(times),
+                'max': max(times),
             }
         }
         
-        if counts_clean:
-            stats['count_stats'] = {
-                'mean': statistics.mean(counts_clean),
-                'median': statistics.median(counts_clean),
-                'stdev': statistics.stdev(counts_clean) if len(counts_clean) > 1 else 0,
-                'min': min(counts_clean),
-                'max': max(counts_clean),
-            }
+        if counts:
+            # For very large counts, use log-scale to avoid overflow
+            mean_count = statistics.mean(counts)
+            try:
+                if mean_count > 1e100 or any(c > 1e100 for c in counts):
+                    # Use log-scale for extremely large numbers
+                    log_counts = [math.log10(c) if c > 0 else 0 for c in counts]
+                    stats['count_stats'] = {
+                        'mean': mean_count,
+                        'median': statistics.median(counts),
+                        'log_stdev': statistics.stdev(log_counts) if len(log_counts) > 1 else 0,
+                        'min': min(counts),
+                        'max': max(counts),
+                    }
+                else:
+                    stats['count_stats'] = {
+                        'mean': mean_count,
+                        'median': statistics.median(counts),
+                        'stdev': statistics.stdev(counts) if len(counts) > 1 else 0,
+                        'min': min(counts),
+                        'max': max(counts),
+                    }
+            except (OverflowError, ValueError):
+                # If we still get overflow, just report mean/median without stdev
+                stats['count_stats'] = {
+                    'mean': mean_count,
+                    'median': statistics.median(counts),
+                    'min': min(counts),
+                    'max': max(counts),
+                }
         
         if iterations_list:
             stats['iterations_stats'] = {
@@ -308,7 +318,7 @@ class BenchmarkRunner:
                 'median': statistics.median(iterations_list),
             }
         
-        print(f"    ✓ {len(times_clean)}/{num_trials} trials succeeded (avg time: {stats['time_stats']['mean']:.2f}s)")
+        print(f"    ✓ {len(times)}/{num_trials} trials succeeded (avg time: {stats['time_stats']['mean']:.2f}s)")
             
         return stats
     
@@ -581,7 +591,7 @@ class BenchmarkRunner:
                     time_mean = stats['time_stats']['mean']
                     time_std = stats['time_stats']['stdev']
                     count = stats.get('count_stats', {}).get('mean', 0)
-                    trials = stats['num_trials_after_outlier_removal']
+                    trials = stats['num_successful_trials']
                     
                     count_str = f"{count:.2e}" if count > 1e6 else f"{count:.0f}"
                     
@@ -615,23 +625,18 @@ def main():
     
     # Generate CNF files
     print("\nGenerating CNF files...")
-    cnf_types = ['standard', 'easy', 'horn', 'random', 'large']
+    cnf_types = ['easy', 'horn', 'random']
     ksat_k_values = [4, 5, 6, 7]
     
     all_cnf_files = []
     generation_seed = 42
     
-    # Generate CNFs from 50 to 5000 in increments of 50
-    sizes = list(range(50, 5001, 50))
+    # Generate CNFs from 300 to 7500 in increments of 300
+    sizes = list(range(300, 7501, 300))
     
     print(f"Generating {len(sizes)} sizes x {len(cnf_types) + len(ksat_k_values)} types = {len(sizes) * (len(cnf_types) + len(ksat_k_values))} CNF files...")
     
     for size in sizes:
-        # Standard 3-SAT
-        cnf_file = cnf_dir / f"standard_{size}.cnf"
-        CNFGenerator.generate_standard_3sat(size, str(cnf_file), generation_seed)
-        all_cnf_files.append(cnf_file)
-        
         # Easy SAT
         cnf_file = cnf_dir / f"easy_{size}.cnf"
         CNFGenerator.generate_easy_sat(size, str(cnf_file), generation_seed)
@@ -645,11 +650,6 @@ def main():
         # Random
         cnf_file = cnf_dir / f"random_{size}.cnf"
         CNFGenerator.generate_random(size, str(cnf_file), generation_seed)
-        all_cnf_files.append(cnf_file)
-        
-        # Large
-        cnf_file = cnf_dir / f"large_{size}.cnf"
-        CNFGenerator.generate_large_3sat(size, str(cnf_file), generation_seed)
         all_cnf_files.append(cnf_file)
         
         # k-SAT variants
