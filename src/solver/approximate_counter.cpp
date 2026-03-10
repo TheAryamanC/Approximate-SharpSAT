@@ -84,9 +84,8 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
         
         vector<XorConstraint> xors;
         if (config_.use_ml_hashes) {
-            MLHashInterface iter_ml("src/ml_model/model.pkl");
-            iter_ml.set_seed(iter_seed);
-            xors = iter_ml.generate_ml_hashes(cnf, hash_level);
+            ml_interface_->set_seed(iter_seed);
+            xors = ml_interface_->generate_ml_hashes(cnf, hash_level);
         } else {
             double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
             xors = iter_hash_gen.generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
@@ -145,8 +144,10 @@ uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
             // generate XOR constraints
             vector<XorConstraint> xors;
             if (config_.use_ml_hashes) {
+                ml_interface_->set_seed(config_.seed + mid * 1000 + i);
                 xors = ml_interface_->generate_ml_hashes(cnf, mid);
             } else {
+                hash_generator_->set_seed(config_.seed + mid * 1000 + i);
                 xors = hash_generator_->generate_random_hashes(cnf.num_variables(), mid, sparsity);
             }
             

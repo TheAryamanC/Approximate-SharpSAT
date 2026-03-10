@@ -39,7 +39,10 @@ public:
     bool is_available() const { return model_available_; }
     
     // Set random seed for hash generation
-    void set_seed(uint32_t seed) { rng_.seed(seed); }
+    void set_seed(uint32_t seed) { 
+        rng_.seed(seed); 
+        fallback_generator_->set_seed(seed);
+    }
     
     // Extract features from CNF
     static CNFFeatures extract_features(const CNF& cnf);

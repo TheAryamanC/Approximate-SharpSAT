@@ -40,6 +40,8 @@ bool MLHashInterface::initialize(const string& model_path) {
     // check if model file exists
     ifstream model_file(model_path);
     if (!model_file.good()) {
+        cerr << "Warning: ML model file not found at " << model_path << endl;
+        cerr << "         Using heuristic importance-weighted hash generation instead" << endl;
         model_available_ = false;
         return false;
     }
@@ -230,12 +232,7 @@ HashConfig MLHashInterface::predict_hash_config(const CNF& cnf, uint32_t num_has
 
 // generate ML-enhanced XOR constraints
 vector<XorConstraint> MLHashInterface::generate_ml_hashes(const CNF& cnf, uint32_t num_hashes) {
-    if (!model_available_) {
-        // fallback to heuristic XOR generation if ML model is not available
-        return generate_heuristic_hashes(cnf, num_hashes);
-    }
-    
-    // get variable importance scores from ML model
+    // get variable importance scores (from ML model or heuristic fallback)
     vector<double> importance = predict_variable_importance(cnf);
     
     // get recommended sparsity for proper constraint density
