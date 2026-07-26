@@ -38,7 +38,7 @@ void test_counter_trivial_unsat() {
     CounterConfig config;
     config.use_cuda = false;  // Test CPU version
     config.use_ml_hashes = false;
-    config.max_iterations = 3;  // Reduce for faster test
+    config.num_trials = 3;  // Reduce for faster test
     
     ApproximateCounter counter(config);
     CountResult result = counter.count(cnf);
@@ -67,7 +67,7 @@ p cnf 2 2
     config.delta = 0.2;
     config.use_cuda = false;
     config.use_ml_hashes = false;
-    config.max_iterations = 5;  // Reduce for faster test
+    config.num_trials = 5;  // Reduce for faster test
     
     ApproximateCounter counter(config);
     CountResult result = counter.count(*cnf);
@@ -118,7 +118,7 @@ p cnf 3 2
     config.delta = 0.2;
     config.use_cuda = false;
     config.use_ml_hashes = false;
-    config.max_iterations = 5;
+    config.num_trials = 5;
     
     ApproximateCounter counter(config);
     CountResult result = counter.count(*cnf);
@@ -153,7 +153,7 @@ p cnf 4 4
     config.delta = 0.3;
     config.use_cuda = false;
     config.use_ml_hashes = false;
-    config.max_iterations = 3;
+    config.num_trials = 3;
     
     ApproximateCounter counter(config);
     CountResult result = counter.count(*cnf);

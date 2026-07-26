@@ -21,6 +21,7 @@ struct AppConfig {
     uint32_t num_trials = 0;        // calculate from epsilon/delta
     bool verbose = false;
     bool show_gpu_info = false;
+    uint32_t num_threads = 0;     // 0 = auto-detect
     
     // user can only specify one of epsilon/delta or trials
     bool epsilon_specified = false;
@@ -47,6 +48,7 @@ void print_usage(const char* prog_name) {
     cout << "  --delta <float>     Confidence parameter (default: 0.2) - Note: Cannot be used with --trials" << endl;
     cout << "  --trials <int>      Number of trials to run (default: calculated from epsilon/delta) - Note: Cannot be used with --epsilon/--delta" << endl;
     cout << "  --timeout <float>   Timeout in seconds per SAT call (default: 60)" << endl;
+    cout << "  --threads <int>     CPU threads for parallel trials (default: auto)" << endl;
     cout << "  --use-ml            Enable ML-enhanced hash generation" << endl;
     cout << "  --no-cuda           Disable CUDA acceleration" << endl;
     cout << "  --seed <int>        Random seed (default: 42)" << endl;
@@ -86,6 +88,8 @@ bool parse_args(int argc, char** argv, AppConfig& config) {
             config.delta_specified = true;
         } else if (arg == "--timeout" && i + 1 < argc) {
             config.timeout_seconds = stod(argv[++i]);
+        } else if (arg == "--threads" && i + 1 < argc) {
+            config.num_threads = stoul(argv[++i]);
         } else if (arg == "--trials" && i + 1 < argc) {
             config.num_trials = stoul(argv[++i]);
             config.trials_specified = true;
@@ -162,6 +166,7 @@ int main(int argc, char** argv) {
     counter_config.use_cuda = config.use_cuda;
     counter_config.timeout_seconds = config.timeout_seconds;
     counter_config.num_trials = config.num_trials;
+    counter_config.num_threads = config.num_threads;
     
     // show configuration
     cout << "Configuration:" << endl;
@@ -197,7 +202,12 @@ int main(int argc, char** argv) {
     // print results
     cout << endl << "Results:" << endl;
     if (result.successful) {
+        // Display log10 count first — accurate even when the raw double overflows
+        cout << "  Log10(Count):        " << result.log10_count << endl;
+        cout << "  Order of Magnitude:  10^" << result.order_of_magnitude() << endl;
         cout << "  Approximate Model Count: " << result.count << endl;
+        cout << "  Lower Bound (log10): " << result.log10_lower_bound << endl;
+        cout << "  Upper Bound (log10): " << result.log10_upper_bound << endl;
         cout << "  Lower Bound: " << result.lower_bound << endl;
         cout << "  Upper Bound: " << result.upper_bound << endl;
         cout << "  Iterations: " << result.num_iterations << endl;

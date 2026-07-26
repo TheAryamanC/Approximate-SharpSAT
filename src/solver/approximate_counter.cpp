@@ -4,6 +4,9 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <thread>
+#include <future>
+#include <atomic>
 
 using namespace std;
 namespace sharpsat {
@@ -37,17 +40,31 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
     CountResult result;
     
     // trivial cases - empty formula + formula with empty clause
+    static constexpr double LOG10_2 = 0.30102999566398119521;
+    static constexpr double MAX_SAFE_LOG10 = 307.0;
+    
     if (cnf.is_empty()) {
-        result.count = pow(2.0, cnf.num_variables());
+        // All 2^n assignments satisfy an empty formula.
+        // Use exact pow(2,n) for n<=1023 (fits in double), log-space otherwise.
+        result.log10_count = cnf.num_variables() * LOG10_2;
+        result.count = (cnf.num_variables() <= 1023)
+                     ? std::pow(2.0, static_cast<double>(cnf.num_variables()))
+                     : std::numeric_limits<double>::infinity();
         result.lower_bound = result.count;
         result.upper_bound = result.count;
+        result.log10_lower_bound = result.log10_count;
+        result.log10_upper_bound = result.log10_count;
         result.successful = true;
         return result;
     }
     if (cnf.has_empty_clause()) {
+        // No satisfying assignment exists.
         result.count = 0.0;
         result.lower_bound = 0.0;
         result.upper_bound = 0.0;
+        result.log10_count       = -std::numeric_limits<double>::infinity();
+        result.log10_lower_bound = -std::numeric_limits<double>::infinity();
+        result.log10_upper_bound = -std::numeric_limits<double>::infinity();
         result.successful = true;
         return result;
     }
@@ -68,56 +85,109 @@ CountResult ApproximateCounter::approxmc(const CNF& cnf) {
         result.count = 0.0;
         result.lower_bound = 0.0;
         result.upper_bound = 0.0;
+        result.log10_count       = -std::numeric_limits<double>::infinity();
+        result.log10_lower_bound = -std::numeric_limits<double>::infinity();
+        result.log10_upper_bound = -std::numeric_limits<double>::infinity();
         result.successful = true;
         return result;
     }
     
     // run multiple iterations and get SAT count
     uint32_t num_iterations = config_.num_trials;
-    uint32_t sat_count = 0;
     
-    // run all iterations
+    // Pre-generate all XOR constraint sets (sequential; ensures reproducibility
+    // and allows ML interface to remain single-threaded)
+    double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
+    std::vector<std::vector<XorConstraint>> all_xors(num_iterations);
     for (uint32_t iter = 0; iter < num_iterations; iter++) {
-        // generate XOR constraints depending on configuration
         uint32_t iter_seed = config_.seed + iter;
-        XorHashGenerator iter_hash_gen(iter_seed);
-        
-        vector<XorConstraint> xors;
         if (config_.use_ml_hashes) {
             ml_interface_->set_seed(iter_seed);
-            xors = ml_interface_->generate_ml_hashes(cnf, hash_level);
+            all_xors[iter] = ml_interface_->generate_ml_hashes(cnf, hash_level);
         } else {
-            double sparsity = XorHashGenerator::get_recommended_sparsity(cnf.num_variables());
-            xors = iter_hash_gen.generate_random_hashes(cnf.num_variables(), hash_level, sparsity);
+            XorHashGenerator iter_hash_gen(iter_seed);
+            all_xors[iter] = iter_hash_gen.generate_random_hashes(
+                cnf.num_variables(), hash_level, sparsity);
         }
+    }
+    
+    // Determine number of worker threads for fork-join parallelism
+    uint32_t hw_threads = std::thread::hardware_concurrency();
+    uint32_t num_threads = (config_.num_threads > 0) ? config_.num_threads
+                                                      : std::max(1u, hw_threads);
+    num_threads = std::min(num_threads, num_iterations);
+    
+    // Fork: launch one async task per partition
+    std::vector<std::future<uint32_t>> futures;
+    futures.reserve(num_threads);
+    
+    for (uint32_t tid = 0; tid < num_threads; tid++) {
+        uint32_t start = (tid * num_iterations) / num_threads;
+        uint32_t end   = ((tid + 1) * num_iterations) / num_threads;
+        if (start >= end) continue;
         
-        // check satisfiability with XOR constraints
-        unordered_map<Variable, bool> assignment;
-        if (check_sat_with_xors(cnf, xors, assignment)) {
-            sat_count++;
-        }
+        futures.push_back(std::async(std::launch::async,
+            [this, &cnf, &all_xors, start, end]() -> uint32_t {
+                uint32_t local_sat = 0;
+                // Each worker owns its own SATSolver — no shared mutable state
+                SATSolver local_solver(config_.timeout_seconds, false);
+                for (uint32_t iter = start; iter < end; iter++) {
+                    auto assignment = apply_xor_constraints_cpu(
+                        all_xors[iter], cnf.num_variables());
+                    CNF simplified = cnf.clone();
+                    simplified.apply_assignment(assignment);
+                    if (!simplified.has_empty_clause() &&
+                        local_solver.solve(simplified, assignment)) {
+                        local_sat++;
+                    }
+                }
+                return local_sat;
+            }));
+    }
+    
+    // Join: collect results from all workers
+    uint32_t sat_count = 0;
+    for (auto& f : futures) {
+        sat_count += f.get();
     }
     
     result.num_iterations = num_iterations;
     
-    // estimate count based on SAT probability
-    double sat_prob = static_cast<double>(sat_count) / num_iterations;
+    // Compute count in log-space to handle extremely large formulas without overflow.
+    // All arithmetic is done as log10 values; result.count is set from them
+    // (it will be std::numeric_limits<double>::infinity() when the formula is huge).
+    const double n = static_cast<double>(cnf.num_variables());
+    const double k = static_cast<double>(hash_level);
     
-    if (sat_prob > 0.0) {
+    if (sat_count > 0) {
         double cell_threshold = config_.get_cell_threshold();
-        double cell_size = pow(2.0, cnf.num_variables() - hash_level);
+        double ni = static_cast<double>(num_iterations);
+        double sc = static_cast<double>(sat_count);
         
-        // use median estimator - adjust count based on observed SAT probability
-        result.count = cell_size * (static_cast<double>(num_iterations) / sat_count) * cell_threshold;
+        // log10(count) = (n-k)*log10(2) + log10(ni/sc) + log10(cell_threshold)
+        result.log10_count = (n - k) * LOG10_2
+                           + std::log10(ni) - std::log10(sc)
+                           + std::log10(cell_threshold);
+        
+        result.count = (result.log10_count <= MAX_SAFE_LOG10)
+                     ? std::pow(10.0, result.log10_count)
+                     : std::numeric_limits<double>::infinity();
         
         // compute bounds
         compute_bounds(hash_level, cnf.num_variables(), result);
         result.successful = true;
     } else {
-        // all iterations were UNSAT - count is very small
-        result.count = pow(2.0, cnf.num_variables() - hash_level - 1);
+        // all iterations were UNSAT — count is very small
+        result.log10_count = (n - k - 1.0) * LOG10_2;
+        result.count = (result.log10_count <= MAX_SAFE_LOG10)
+                     ? std::pow(10.0, result.log10_count)
+                     : std::numeric_limits<double>::infinity();
+        result.log10_lower_bound = -std::numeric_limits<double>::infinity();
         result.lower_bound = 0.0;
-        result.upper_bound = result.count * 2.0;
+        result.log10_upper_bound = result.log10_count + LOG10_2; // *2
+        result.upper_bound = (result.log10_upper_bound <= MAX_SAFE_LOG10)
+                           ? std::pow(10.0, result.log10_upper_bound)
+                           : std::numeric_limits<double>::infinity();
         result.successful = true;
     }
     
@@ -177,6 +247,85 @@ uint32_t ApproximateCounter::find_hash_level(const CNF& cnf) {
     }
     
     return hash_level;
+}
+
+// CPU-only Gaussian elimination over GF(2) — thread-safe static implementation
+// used by parallel trial workers so they never touch shared GPU state.
+unordered_map<Variable, bool> ApproximateCounter::apply_xor_constraints_cpu(
+        const vector<XorConstraint>& xors, uint32_t num_variables) {
+    unordered_map<Variable, bool> assignment;
+    
+    if (xors.empty()) {
+        return assignment;
+    }
+    
+    // Build augmented matrix [A | b] where each row encodes one XOR constraint
+    vector<vector<bool>> matrix;
+    vector<bool> rhs_vec;
+    
+    for (const auto& xor_c : xors) {
+        vector<bool> row(num_variables, false);
+        for (Variable v : xor_c.variables) {
+            if (v > 0 && v <= num_variables) {
+                row[v - 1] = true;
+            }
+        }
+        matrix.push_back(row);
+        rhs_vec.push_back(xor_c.rhs);
+    }
+    
+    // Forward elimination to row echelon form
+    size_t num_rows = matrix.size();
+    size_t pivot_row = 0;
+    
+    for (size_t col = 0; col < num_variables && pivot_row < num_rows; col++) {
+        // Find pivot in this column
+        size_t pivot = pivot_row;
+        for (size_t r = pivot_row; r < num_rows; r++) {
+            if (matrix[r][col]) { pivot = r; break; }
+        }
+        
+        if (!matrix[pivot][col]) continue; // no pivot in this column
+        
+        if (pivot != pivot_row) {
+            swap(matrix[pivot], matrix[pivot_row]);
+            swap(rhs_vec[pivot], rhs_vec[pivot_row]);
+        }
+        
+        // Eliminate rows below pivot
+        for (size_t r = pivot_row + 1; r < num_rows; r++) {
+            if (matrix[r][col]) {
+                for (size_t c = 0; c < num_variables; c++) {
+                    matrix[r][c] = matrix[r][c] != matrix[pivot_row][c];
+                }
+                rhs_vec[r] = rhs_vec[r] != rhs_vec[pivot_row];
+            }
+        }
+        pivot_row++;
+    }
+    
+    // Back-substitution
+    for (int r = static_cast<int>(num_rows) - 1; r >= 0; r--) {
+        int lead_var = -1;
+        for (size_t c = 0; c < num_variables; c++) {
+            if (matrix[r][c]) { lead_var = static_cast<int>(c); break; }
+        }
+        if (lead_var < 0) continue;
+        
+        bool value = rhs_vec[r];
+        for (size_t c = static_cast<size_t>(lead_var) + 1; c < num_variables; c++) {
+            if (matrix[r][c]) {
+                Variable v = static_cast<Variable>(c + 1);
+                auto it = assignment.find(v);
+                if (it != assignment.end()) {
+                    value = value != it->second;
+                }
+            }
+        }
+        assignment[static_cast<Variable>(lead_var + 1)] = value;
+    }
+    
+    return assignment;
 }
 
 // Check if formula is satisfiable with added XOR constraints
@@ -297,10 +446,19 @@ unordered_map<Variable, bool> ApproximateCounter::apply_xor_constraints(const ve
 }
 
 void ApproximateCounter::compute_bounds(uint32_t hash_level, uint32_t num_variables, CountResult& result) {
-    // compute confidence bounds based on epsilon and delta
-    double factor = 1.0 + config_.epsilon;    
-    result.lower_bound = result.count / factor;
-    result.upper_bound = result.count * factor;
+    // Compute confidence bounds in log-space (avoids overflow for huge formulas)
+    static constexpr double MAX_SAFE_LOG10 = 307.0;
+    double log10_factor = std::log10(1.0 + config_.epsilon);
+    
+    result.log10_lower_bound = result.log10_count - log10_factor;
+    result.log10_upper_bound = result.log10_count + log10_factor;
+    
+    result.lower_bound = (result.log10_lower_bound <= MAX_SAFE_LOG10)
+                       ? std::pow(10.0, result.log10_lower_bound)
+                       : std::numeric_limits<double>::infinity();
+    result.upper_bound = (result.log10_upper_bound <= MAX_SAFE_LOG10)
+                       ? std::pow(10.0, result.log10_upper_bound)
+                       : std::numeric_limits<double>::infinity();
 }
 
 } // namespace sharpsat
